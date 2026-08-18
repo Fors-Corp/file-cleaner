@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 
@@ -57,6 +58,17 @@ class VolumeInfo:
     used_bytes: int
     free_bytes: int
     is_root: bool = False
+
+
+@dataclass
+class BackupInfo:
+    udid: str
+    path: Path
+    device_name: str
+    product_type: str
+    last_backup_date: datetime | None
+    size_bytes: int
+    encrypted: bool
 
 
 @dataclass

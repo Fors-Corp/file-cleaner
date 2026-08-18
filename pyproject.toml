@@ -16,6 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Experimental, unverified: iOS device management over USB (`fclean device ...`).
+# Kept optional since it pulls a heavy dependency tree for a feature that
+# could not be tested end-to-end without a physical iPhone/iPad connected.
+device = ["pymobiledevice3>=4.0"]
 
 [project.scripts]
 fclean = "filecleaner.cli:app"

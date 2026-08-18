@@ -12,7 +12,9 @@ from rich.table import Table
 
 from filecleaner import __version__
 from filecleaner import audit as audit_mod
+from filecleaner import backups as backups_mod
 from filecleaner import config as config_mod
+from filecleaner import device as device_mod
 from filecleaner import duplicates as duplicates_mod
 from filecleaner import format as fmt
 from filecleaner import quarantine as quarantine_mod
@@ -28,8 +30,16 @@ app = typer.Typer(
 )
 quarantine_app = typer.Typer(no_args_is_help=True, help="Inspect or purge the quarantine safety net.")
 config_app = typer.Typer(no_args_is_help=True, help="View or edit configuration and rules.")
+backups_app = typer.Typer(no_args_is_help=True, help="Manage local iPhone/iPad backups (from cable/Finder syncs).")
+device_app = typer.Typer(
+    no_args_is_help=True,
+    help="[EXPERIMENTAL, UNVERIFIED] Manage a connected iPhone/iPad live, over USB. "
+    "Built without a physical device available to test against — try `fclean device list` first.",
+)
 app.add_typer(quarantine_app, name="quarantine")
 app.add_typer(config_app, name="config")
+app.add_typer(backups_app, name="backups")
+app.add_typer(device_app, name="device")
 
 console = Console()
 
@@ -304,6 +314,160 @@ def large_files(
     for size, file_path in results[:top]:
         table.add_row(fmt.human_size(size), str(file_path))
     console.print(table)
+
+
+def _print_backups_table(backups, title: str) -> None:
+    table = Table(title=title)
+    table.add_column("Device")
+    table.add_column("Type")
+    table.add_column("Last backup")
+    table.add_column("Size", justify="right")
+    table.add_column("Encrypted")
+    for b in sorted(backups, key=lambda b: b.size_bytes, reverse=True):
+        last = b.last_backup_date.strftime("%Y-%m-%d %H:%M") if b.last_backup_date else "unknown"
+        table.add_row(b.device_name, b.product_type or "?", last, fmt.human_size(b.size_bytes), "yes" if b.encrypted else "no")
+    console.print(table)
+
+
+@backups_app.command("list")
+def backups_list() -> None:
+    """List local iPhone/iPad backups under ~/Library/Application Support/MobileSync/Backup."""
+    try:
+        found = backups_mod.find_backups()
+    except backups_mod.BackupAccessDenied as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1)
+
+    if not found:
+        console.print("No local iPhone/iPad backups found.")
+        return
+    _print_backups_table(found, title="iPhone/iPad backups")
+    console.print(f"Total: {fmt.human_size(sum(b.size_bytes for b in found))}")
+
+
+@backups_app.command("clean")
+def backups_clean(
+    keep_latest: int = typer.Option(1, "--keep-latest", help="Always keep this many most-recent backups per device."),
+    older_than: Optional[int] = typer.Option(
+        None, "--older-than", help="Only consider backups at least this many days old."
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Actually move stale backups to quarantine (default: dry-run)."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+) -> None:
+    """Move stale iPhone/iPad backups into quarantine. Always keeps the most recent backup per device."""
+    cfg = config_mod.load_config()
+    try:
+        found = backups_mod.find_backups()
+    except backups_mod.BackupAccessDenied as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1)
+
+    stale = backups_mod.stale_backups(found, keep_latest_per_device=keep_latest, older_than_days=older_than)
+    if not stale:
+        console.print(f"Nothing stale — {len(found)} backup(s) found, all within the keep-latest-{keep_latest} window.")
+        return
+
+    _print_backups_table(stale, title="Stale backups (candidates for quarantine)")
+    total = sum(b.size_bytes for b in stale)
+    console.print(f"[bold]Total reclaimable: {fmt.human_size(total)}[/bold]")
+
+    if not apply:
+        console.print("\n[dim]Dry run only — nothing was moved. Re-run with --apply to quarantine these backups.[/dim]")
+        return
+
+    if not yes:
+        confirmed = Confirm.ask(
+            f"\nMove {len(stale)} backup(s) ({fmt.human_size(total)}) to quarantine? "
+            f"(restorable for {cfg['retention_days']} days)"
+        )
+        if not confirmed:
+            console.print("Cancelled.")
+            raise typer.Exit()
+
+    candidates = [backups_mod.to_candidate(b) for b in stale]
+    entries = quarantine_mod.quarantine_candidates(candidates, cfg)
+    console.print(
+        f"[green]Quarantined {len(entries)} backup(s) ({fmt.human_size(sum(e.size_bytes for e in entries))}).[/green]"
+    )
+
+
+@device_app.command("list")
+def device_list() -> None:
+    """[EXPERIMENTAL] List iOS devices connected over USB."""
+    try:
+        found = device_mod.list_devices()
+    except device_mod.DeviceUnavailable as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1)
+
+    if not found:
+        console.print("No iOS devices connected.")
+        return
+    table = Table(title="Connected iOS devices")
+    table.add_column("Name")
+    table.add_column("Product type")
+    table.add_column("UDID")
+    for d in found:
+        table.add_row(d.name, d.product_type, d.udid)
+    console.print(table)
+
+
+@device_app.command("apps")
+def device_apps(
+    udid: Optional[str] = typer.Option(None, "--udid", help="Target a specific device (default: first connected)."),
+    all_apps: bool = typer.Option(False, "--all", help="Include system apps, not just user-installed ones."),
+) -> None:
+    """[EXPERIMENTAL] List installed apps and their on-device storage usage."""
+    try:
+        apps = device_mod.list_apps(udid, user_apps_only=not all_apps)
+    except device_mod.DeviceUnavailable as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1)
+
+    if not apps:
+        console.print("No apps found.")
+        return
+    table = Table(title="Installed apps")
+    table.add_column("App")
+    table.add_column("Version")
+    table.add_column("Size", justify="right")
+    table.add_column("Bundle ID")
+    for a in sorted(apps, key=lambda a: a.size_bytes, reverse=True):
+        table.add_row(a.name, a.version, fmt.human_size(a.size_bytes), a.bundle_id)
+    console.print(table)
+    console.print(f"Total: {fmt.human_size(sum(a.size_bytes for a in apps))}")
+
+
+@device_app.command("uninstall")
+def device_uninstall(
+    bundle_id: str,
+    udid: Optional[str] = typer.Option(None, "--udid"),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+) -> None:
+    """[EXPERIMENTAL] Uninstall an app from the connected device.
+
+    This removes the app AND its on-device data. Unlike everything else in
+    fclean, this does not go through the local quarantine — there's no
+    "restore" for a device uninstall short of reinstalling the app fresh
+    from the App Store. Confirmation is required.
+    """
+    if not yes:
+        confirmed = Confirm.ask(
+            f"Uninstall {bundle_id} from the device? This removes its on-device data too "
+            "and cannot be undone by fclean."
+        )
+        if not confirmed:
+            console.print("Cancelled.")
+            raise typer.Exit()
+
+    try:
+        device_mod.uninstall_app(bundle_id, udid)
+    except device_mod.DeviceUnavailable as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]Uninstalled {bundle_id}.[/green]")
+    audit_mod.log_action("device_uninstall", {"bundle_id": bundle_id, "udid": udid})
 
 
 @app.command()
