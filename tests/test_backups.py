@@ -1,5 +1,5 @@
 import plistlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,7 +12,7 @@ def _make_backup(root, udid, device_name, product_type, days_ago, encrypted=Fals
     info = {
         "Device Name": device_name,
         "Product Type": product_type,
-        "Last Backup Date": datetime.now(timezone.utc) - timedelta(days=days_ago),
+        "Last Backup Date": datetime.now(UTC) - timedelta(days=days_ago),
     }
     with (backup_dir / "Info.plist").open("wb") as f:
         plistlib.dump(info, f)

@@ -1,4 +1,7 @@
+import pytest
+
 from filecleaner import scanner
+from filecleaner.models import Candidate, Rule
 
 
 def test_scan_finds_old_cache(sandbox_config, sandbox_home, age_path):
@@ -63,3 +66,146 @@ def test_disabled_rule_excluded_by_default(sandbox_config, sandbox_home, age_pat
     result = scanner.run_scan(sandbox_config)  # no only_rules -> respects enabled_by_default
 
     assert not any(c.rule_id == "dev_node_modules" for c in result.candidates)
+
+
+def test_unknown_rule_id_raises(sandbox_config, sandbox_home):
+    with pytest.raises(scanner.UnknownRuleError):
+        scanner.run_scan(sandbox_config, only_rules={"totally_made_up_rule"})
+
+
+def test_include_disabled_reports_opt_in_rules(sandbox_config, sandbox_home, age_path):
+    node_modules = sandbox_home / "project" / "node_modules"
+    node_modules.mkdir(parents=True)
+    pkg = node_modules / "pkg.js"
+    pkg.write_text("x")
+    age_path(pkg, days=60)
+    age_path(node_modules, days=60)
+
+    result = scanner.run_scan(sandbox_config, include_disabled=True)
+
+    assert any(c.rule_id == "dev_node_modules" for c in result.candidates)
+
+
+class TestGlobMatcher:
+    def test_double_star_matches_any_depth(self):
+        matcher = scanner.GlobMatcher.compile("**/.DS_Store")
+        assert matcher.matches(".DS_Store")
+        assert matcher.matches("a/b/c/.DS_Store")
+        assert not matcher.matches("a/b/c/NotIt")
+
+    def test_single_star_does_not_cross_slash(self):
+        matcher = scanner.GlobMatcher.compile("Library/Caches/*")
+        assert matcher.matches("Library/Caches/App")
+        assert not matcher.matches("Library/Caches/App/nested")
+
+    def test_static_prefix_is_the_non_wildcard_lead(self):
+        matcher = scanner.GlobMatcher.compile("Library/Caches/*")
+        assert matcher.static_prefix == "Library/Caches"
+
+    def test_trailing_double_star_exclude_matches_directory_itself(self):
+        matcher = scanner.GlobMatcher.compile("Library/**")
+        assert matcher.matches("Library")
+        assert matcher.matches("Library/Anything/Deep")
+
+
+def test_exclude_prunes_entire_subtree(sandbox_config, sandbox_home):
+    # ds_store excludes Library/** — a .DS_Store *inside* Library must never match,
+    # even though the pattern **/.DS_Store would otherwise reach it.
+    lib_ds = sandbox_home / "Library" / "SomeFolder" / ".DS_Store"
+    lib_ds.parent.mkdir(parents=True)
+    lib_ds.write_bytes(b"x")
+    home_ds = sandbox_home / "Documents" / ".DS_Store"
+    home_ds.parent.mkdir(parents=True)
+    home_ds.write_bytes(b"x")
+
+    result = scanner.run_scan(sandbox_config, only_rules={"ds_store"})
+
+    matched_paths = {c.path for c in result.candidates}
+    assert home_ds in matched_paths
+    assert lib_ds not in matched_paths
+
+
+def test_directory_age_uses_newest_file_inside(sandbox_config, sandbox_home, age_path):
+    """A cache directory with one freshly-written file inside must not be
+    treated as stale just because the directory's own mtime is old."""
+    cache_dir = sandbox_home / "Library" / "Caches" / "ActiveApp"
+    cache_dir.mkdir(parents=True)
+    old_file = cache_dir / "old.bin"
+    old_file.write_bytes(b"x" * 100)
+    age_path(cache_dir, days=10)
+    age_path(old_file, days=10)
+
+    new_file = cache_dir / "fresh.bin"
+    new_file.write_bytes(b"y" * 100)  # written just now, dir mtime bumped too
+
+    result = scanner.run_scan(sandbox_config, only_rules={"system_caches"})
+
+    assert not any(c.path == cache_dir for c in result.candidates)
+
+
+def test_coalesce_drops_nested_candidate():
+    parent = Candidate(path=__import__("pathlib").Path("/a/b"), size_bytes=100, is_dir=True, mtime=0, rule_id="r1", category="C", risk="low")
+    child = Candidate(path=__import__("pathlib").Path("/a/b/c"), size_bytes=10, is_dir=False, mtime=0, rule_id="r2", category="C", risk="low")
+    kept, dropped = scanner.coalesce([parent, child])
+    assert kept == [parent]
+    assert dropped == 1
+
+
+def test_coalesce_drops_exact_duplicate():
+    from pathlib import Path
+
+    a = Candidate(path=Path("/a/b"), size_bytes=100, is_dir=True, mtime=0, rule_id="r1", category="C", risk="low")
+    b = Candidate(path=Path("/a/b"), size_bytes=100, is_dir=True, mtime=0, rule_id="r2", category="C", risk="low")
+    kept, dropped = scanner.coalesce([a, b])
+    assert len(kept) == 1
+    assert dropped == 1
+
+
+def test_select_rules_only_rules_ignores_enabled_state(sandbox_config):
+    # old_downloads is disabled by default; --rules should still select it explicitly.
+    selected = scanner.select_rules(sandbox_config, only_rules={"old_downloads"})
+    assert [r.id for r in selected] == ["old_downloads"]
+
+
+def test_scan_result_duration_is_recorded(sandbox_config, sandbox_home):
+    result = scanner.run_scan(sandbox_config, only_rules={"system_caches"})
+    assert result.duration_seconds >= 0.0
+
+
+def test_scan_caps_reported_errors(sandbox_config, sandbox_home, monkeypatch):
+    """A rule that hits many unreadable directories should never grow the
+    error list without bound."""
+    rule = Rule(
+        id="unreadable_probe",
+        label="probe",
+        category="Test",
+        description="",
+        enabled_by_default=True,
+        risk="low",
+        kind="dir",
+        scope="home",
+        include_globs=("blocked/*",),
+    )
+    blocked = sandbox_home / "blocked"
+    blocked.mkdir()
+    for i in range(5):
+        (blocked / f"sub{i}").mkdir()
+        (blocked / f"sub{i}" / "inner").mkdir()
+
+    import os
+
+    real_scandir = os.scandir
+
+    def flaky_scandir(path):
+        if "sub" in str(path) and "inner" not in str(path):
+            raise PermissionError("nope")
+        return real_scandir(path)
+
+    monkeypatch.setattr(scanner.os, "scandir", flaky_scandir)
+    monkeypatch.setattr(scanner, "_MAX_ERRORS", 2)
+
+    from filecleaner.models import ScanResult
+
+    result = ScanResult(scan_roots=[sandbox_home])
+    scanner.scan_rule(sandbox_home, rule, result, extra_protected=())
+    assert len(result.errors) <= 2

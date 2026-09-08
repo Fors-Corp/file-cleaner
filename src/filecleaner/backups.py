@@ -15,12 +15,19 @@ Full Disk Access raises BackupAccessDenied.
 from __future__ import annotations
 
 import plistlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from filecleaner.models import BackupInfo, Candidate
 
-DEFAULT_BACKUP_ROOT = Path.home() / "Library" / "Application Support" / "MobileSync" / "Backup"
+
+def default_backup_root() -> Path:
+    """Recomputed on every call (not a frozen module constant) so it always
+    reflects the current home directory — important for tests that
+    redirect ``Path.home()``, and in principle for any future scenario
+    where the effective home directory could change within one process."""
+    return Path.home() / "Library" / "Application Support" / "MobileSync" / "Backup"
 
 
 class BackupAccessDenied(Exception):
@@ -41,16 +48,17 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-def _load_plist(path: Path) -> dict:
+def _load_plist(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as f:
-            return plistlib.load(f)
+            data: Any = plistlib.load(f)
+            return data if isinstance(data, dict) else {}
     except (OSError, plistlib.InvalidFileException):
         return {}
 
 
 def find_backups(base: Path | None = None) -> list[BackupInfo]:
-    base = base or DEFAULT_BACKUP_ROOT
+    base = base or default_backup_root()
     if not base.is_dir():
         return []
 
@@ -95,8 +103,8 @@ def _age_days(dt: datetime | None) -> float | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+        dt = dt.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - dt).total_seconds() / 86400
 
 
 def stale_backups(
@@ -115,7 +123,7 @@ def stale_backups(
     for group in grouped.values():
         group_sorted = sorted(
             group,
-            key=lambda b: b.last_backup_date or datetime.min.replace(tzinfo=timezone.utc),
+            key=lambda b: b.last_backup_date or datetime.min.replace(tzinfo=UTC),
             reverse=True,
         )
         candidates = group_sorted[keep_latest_per_device:]

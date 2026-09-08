@@ -1,56 +1,202 @@
-"""Local, plain-text configuration.
+"""Local, plain-text configuration with validation.
 
-Everything filecleaner does is local-only: no network calls, no telemetry,
+Everything File Cleaner does is local-only: no network calls, no telemetry,
 nothing phones home. Config, quarantine manifest, and audit log all live
 under the user's home directory with restrictive permissions (0700 dirs /
 0600 files) since paths and filenames can reveal personal information.
+
+Locations (override with environment variables for testing or portability):
+
+* ``FILECLEANER_CONFIG_DIR`` — default ``$XDG_CONFIG_HOME/filecleaner`` or
+  ``~/.config/filecleaner``
+* ``FILECLEANER_DATA_DIR`` — default ``~/.filecleaner``
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
-import stat
+import tempfile
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import tomli_w
 
-CONFIG_DIR = Path.home() / ".config" / "filecleaner"
+
+class ConfigError(Exception):
+    """The configuration file is unreadable or contains an invalid value."""
+
+
+def _config_dir_from_env() -> Path:
+    explicit = os.environ.get("FILECLEANER_CONFIG_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "filecleaner"
+
+
+def _data_dir_from_env() -> Path:
+    explicit = os.environ.get("FILECLEANER_DATA_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / ".filecleaner"
+
+
+CONFIG_DIR = _config_dir_from_env()
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
-DATA_DIR = Path.home() / ".filecleaner"
+DATA_DIR = _data_dir_from_env()
 DEFAULT_QUARANTINE_DIR = DATA_DIR / "quarantine"
 AUDIT_LOG_PATH = DATA_DIR / "audit.log"
+
+# Name of the per-volume quarantine folder created at the root of an
+# external volume when ``volume_local_quarantine`` is on.
+VOLUME_QUARANTINE_DIRNAME = ".filecleaner-quarantine"
 
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 
 
+# --------------------------------------------------------------------------
+# Schema
+# --------------------------------------------------------------------------
+
+
+def _check_non_negative_int(value: Any, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{key}: expected an integer, got {type(value).__name__}")
+    if value < 0:
+        raise ConfigError(f"{key}: must be >= 0, got {value}")
+    return value
+
+
+def _check_bool(value: Any, key: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{key}: expected true/false, got {type(value).__name__}")
+    return value
+
+
+def _check_str(value: Any, key: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{key}: expected a non-empty string")
+    return value
+
+
+def _check_str_list(value: Any, key: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{key}: expected a list of strings")
+    return list(value)
+
+
+def _check_overrides(value: Any, key: str) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{key}: expected a table of rule_id = true/false")
+    for rule_id, flag in value.items():
+        if not isinstance(flag, bool):
+            raise ConfigError(f"{key}.{rule_id}: expected true/false, got {type(flag).__name__}")
+    return dict(value)
+
+
+def _check_rules(value: Any, key: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+        raise ConfigError(f"{key}: expected an array of tables ([[rules]] blocks)")
+    return list(value)
+
+
+# key -> (default, validator, one-line description shown by `config show`)
+CONFIG_SCHEMA: dict[str, tuple[Any, Callable[[Any, str], Any], str]] = {
+    "retention_days": (
+        30,
+        _check_non_negative_int,
+        "Days an item must sit in quarantine before `quarantine purge` will touch it.",
+    ),
+    "quarantine_dir": (
+        str(DEFAULT_QUARANTINE_DIR),
+        _check_str,
+        "Primary quarantine folder (used for anything on the same volume as it).",
+    ),
+    "volume_local_quarantine": (
+        True,
+        _check_bool,
+        "Quarantine items from other volumes into a folder on that same volume "
+        "(instant rename, no copy). Falls back to quarantine_dir when the volume is read-only.",
+    ),
+    "protected_paths": (
+        [],
+        _check_str_list,
+        "Paths that are never touched, on top of the built-in deny-list (see `config keep`).",
+    ),
+    "scan_roots": (
+        [],
+        _check_str_list,
+        "Roots to scan. Empty = home directory + every mounted external volume.",
+    ),
+    "rule_overrides": (
+        {},
+        _check_overrides,
+        "rule_id = true/false to force a rule on or off regardless of its default.",
+    ),
+    "hash_duplicates_max_bytes": (
+        2_000_000_000,
+        _check_non_negative_int,
+        "Files larger than this are never hashed (duplicate search / manifest integrity).",
+    ),
+    "rules": (
+        [],
+        _check_rules,
+        "Custom rules ([[rules]] tables) — see README for the fields.",
+    ),
+}
+
+
 def default_config() -> dict[str, Any]:
-    return {
-        "retention_days": 30,
-        "quarantine_dir": str(DEFAULT_QUARANTINE_DIR),
-        "protected_paths": [],
-        "scan_roots": [],  # empty = home dir + auto-detected external volumes
-        "rule_overrides": {},  # rule_id -> bool, overrides a rule's enabled_by_default
-        "hash_duplicates_max_bytes": 2_000_000_000,
-    }
+    cfg = {key: _copy(default) for key, (default, _validator, _desc) in CONFIG_SCHEMA.items()}
+    # CONFIG_SCHEMA's "quarantine_dir" default was captured once at import
+    # time; re-resolve it from the current DEFAULT_QUARANTINE_DIR so that
+    # overriding it later (tests, or FILECLEANER_DATA_DIR at a fresh import)
+    # is actually honoured instead of silently falling back to whatever
+    # path was live the moment this module first loaded.
+    cfg["quarantine_dir"] = str(DEFAULT_QUARANTINE_DIR)
+    return cfg
+
+
+def _copy(value: Any) -> Any:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, dict):
+        return dict(value)
+    return value
+
+
+def validate_config(config: dict[str, Any]) -> list[str]:
+    """Validate in place. Returns non-fatal warnings; raises ``ConfigError`` on fatal problems."""
+    warnings: list[str] = []
+    for key, value in list(config.items()):
+        if key not in CONFIG_SCHEMA:
+            warnings.append(f"unknown config key {key!r} (ignored)")
+            continue
+        _default, validator, _desc = CONFIG_SCHEMA[key]
+        config[key] = validator(value, key)
+    return warnings
+
+
+# --------------------------------------------------------------------------
+# Filesystem plumbing
+# --------------------------------------------------------------------------
 
 
 def _secure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, _DIR_MODE)
-    except OSError:
-        pass
 
 
 def _secure_file(path: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, _FILE_MODE)
-    except OSError:
-        pass
 
 
 def ensure_dirs() -> None:
@@ -58,24 +204,47 @@ def ensure_dirs() -> None:
     _secure_dir(DATA_DIR)
 
 
-def load_config() -> dict[str, Any]:
+def load_config(*, warnings: list[str] | None = None) -> dict[str, Any]:
+    """Load, validate and return the merged configuration.
+
+    Creates a default config file on first run. Non-fatal problems are
+    appended to ``warnings`` if a list is given.
+    """
     ensure_dirs()
     defaults = default_config()
     if not CONFIG_FILE.exists():
         save_config(defaults)
         return defaults
 
-    with CONFIG_FILE.open("rb") as f:
-        loaded = tomllib.load(f)
+    try:
+        with CONFIG_FILE.open("rb") as f:
+            loaded = tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{CONFIG_FILE} is not valid TOML: {exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"could not read {CONFIG_FILE}: {exc}") from exc
 
     merged = {**defaults, **loaded}
+    found = validate_config(merged)
+    if warnings is not None:
+        warnings.extend(found)
     return merged
 
 
 def save_config(config: dict[str, Any]) -> None:
+    """Atomically write the config (temp file + rename) with 0600 permissions."""
     ensure_dirs()
-    with CONFIG_FILE.open("wb") as f:
-        tomli_w.dump(config, f)
+    validate_config(config)
+    fd, tmp_name = tempfile.mkstemp(prefix=".config-", suffix=".toml", dir=CONFIG_DIR)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(config, f)
+        _secure_file(tmp)
+        os.replace(tmp, CONFIG_FILE)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     _secure_file(CONFIG_FILE)
 
 
@@ -95,6 +264,21 @@ def get_audit_log_path() -> Path:
         AUDIT_LOG_PATH.touch()
     _secure_file(AUDIT_LOG_PATH)
     return AUDIT_LOG_PATH
+
+
+def data_paths_to_protect(config: dict[str, Any]) -> tuple[Path, ...]:
+    """File Cleaner's own state must never be scanned, quarantined or purged
+    as if it were junk — that would eat the safety net itself."""
+    return (
+        CONFIG_DIR,
+        DATA_DIR,
+        Path(config.get("quarantine_dir") or DEFAULT_QUARANTINE_DIR).expanduser(),
+    )
+
+
+# --------------------------------------------------------------------------
+# Accessors
+# --------------------------------------------------------------------------
 
 
 def is_rule_enabled(config: dict[str, Any], rule_id: str, default: bool) -> bool:
@@ -123,3 +307,36 @@ def remove_keep_path(config: dict[str, Any], path: str) -> bool:
         paths.remove(normalized)
         return True
     return False
+
+
+def set_value(config: dict[str, Any], key: str, raw: str) -> Any:
+    """Parse ``raw`` (typed from the command line) into the right type for
+    ``key``, validate it, store it and return the parsed value."""
+    if key not in CONFIG_SCHEMA:
+        raise ConfigError(f"unknown config key {key!r}; valid keys: {', '.join(sorted(CONFIG_SCHEMA))}")
+    if key in ("rule_overrides", "rules"):
+        raise ConfigError(
+            f"{key} cannot be set from the command line; use `config enable/disable` or edit {CONFIG_FILE}"
+        )
+    default, validator, _desc = CONFIG_SCHEMA[key]
+    text = raw.strip()
+    value: Any
+    if isinstance(default, bool):
+        lowered = text.lower()
+        if lowered in ("1", "true", "yes", "on"):
+            value = True
+        elif lowered in ("0", "false", "no", "off"):
+            value = False
+        else:
+            raise ConfigError(f"{key}: expected true/false, got {raw!r}")
+    elif isinstance(default, int):
+        try:
+            value = int(text.replace("_", ""))
+        except ValueError as exc:
+            raise ConfigError(f"{key}: expected an integer, got {raw!r}") from exc
+    elif isinstance(default, list):
+        value = [] if not text else [p.strip() for p in text.split(",") if p.strip()]
+    else:
+        value = text
+    config[key] = validator(value, key)
+    return config[key]

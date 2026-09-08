@@ -7,6 +7,17 @@ from pathlib import Path
 import pytest
 
 from filecleaner import config as config_mod
+from filecleaner import safety as safety_mod
+
+
+@pytest.fixture(autouse=True)
+def _reset_safety_cache():
+    """`safety._volume_roots()` caches mounted volumes briefly for
+    performance; start every test with a clean slate so tests can never
+    observe another test's cached mount state."""
+    safety_mod.reset_caches()
+    yield
+    safety_mod.reset_caches()
 
 
 @pytest.fixture
@@ -19,6 +30,10 @@ def sandbox_home(tmp_path, monkeypatch):
     fake_data_dir = tmp_path / "data"
 
     monkeypatch.setattr(Path, "home", lambda: fake_home)
+    # Path.expanduser() reads the HOME environment variable directly (not
+    # Path.home()), so both must point at the sandbox for "~" to resolve
+    # inside it consistently.
+    monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setattr(config_mod, "CONFIG_DIR", fake_config_dir)
     monkeypatch.setattr(config_mod, "CONFIG_FILE", fake_config_dir / "config.toml")
     monkeypatch.setattr(config_mod, "DATA_DIR", fake_data_dir)

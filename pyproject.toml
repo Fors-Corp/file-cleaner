@@ -4,9 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "filecleaner"
-version = "0.1.0"
-description = "Local-only, privacy-preserving disk cleanup tool with a quarantine-based backup system"
+version = "1.0.0"
+description = "Local-only, privacy-preserving macOS disk cleanup tool with a quarantine-based safety net"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "All Rights Reserved" }
+authors = [{ name = "Marc Fors", email = "developer@marcfors.com" }]
+keywords = ["macos", "disk-cleanup", "cli", "tui"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: End Users/Desktop",
+    "License :: Other/Proprietary License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Filesystems",
+    "Topic :: Utilities",
+]
 dependencies = [
     "typer>=0.12",
     "rich>=13.7",
@@ -15,17 +33,55 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
 # Experimental, unverified: iOS device management over USB (`fclean device ...`).
 # Kept optional since it pulls a heavy dependency tree for a feature that
 # could not be tested end-to-end without a physical iPhone/iPad connected.
 device = ["pymobiledevice3>=4.0"]
 
+[project.urls]
+Repository = "https://github.com/marcfs31/file-cleaner"
+Changelog = "https://github.com/marcfs31/file-cleaner/blob/main/CHANGELOG.md"
+
 [project.scripts]
-fclean = "filecleaner.cli:app"
+fclean = "filecleaner.cli:_entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=filecleaner --cov-report=term-missing"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["filecleaner"]
+branch = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# typer.Option(...)/typer.Argument(...) as parameter defaults is the
+# standard, documented Typer idiom (it's how Typer builds the CLI's option
+# metadata) — not the mutable-default footgun B008 otherwise guards against.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
