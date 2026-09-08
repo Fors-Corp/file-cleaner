@@ -85,3 +85,12 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+# pymobiledevice3 backs the optional `device` extra (see pyproject's
+# [project.optional-dependencies]) and device.py already imports it lazily,
+# inside functions, precisely so the rest of the tool works without it.
+# Type-checking shouldn't require installing a heavy USB-device library
+# that most contributors and CI runs have no reason to pull in.
+module = "pymobiledevice3.*"
+ignore_missing_imports = true
