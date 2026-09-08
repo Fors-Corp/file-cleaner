@@ -25,8 +25,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install the package with dev dependencies
-        run: python -m pip install -e ".[dev]"
+      - name: Install the package with dev + device dependencies
+        # `device` is optional for end users installing the packaged CLI
+        # (it pulls in pymobiledevice3, a heavy dependency tree for a
+        # feature most installs never touch) but tests/test_device.py
+        # deliberately exercises the real library end-to-end against "no
+        # device connected", so it's needed here.
+        run: python -m pip install -e ".[dev,device]"
 
       - name: Ruff (lint)
         run: ruff check src/ tests/
