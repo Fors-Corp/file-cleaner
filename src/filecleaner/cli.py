@@ -31,8 +31,10 @@ from filecleaner import format as fmt
 from filecleaner import largefiles as largefiles_mod
 from filecleaner import output as output_mod
 from filecleaner import plan as plan_mod
+from filecleaner import profiles as profiles_mod
 from filecleaner import quarantine as quarantine_mod
 from filecleaner import rules as rules_mod
+from filecleaner import schedule as schedule_mod
 from filecleaner import volumes as volumes_mod
 from filecleaner.models import ActionResult, BackupInfo, QuarantineEntry, ScanResult
 
@@ -49,10 +51,21 @@ device_app = typer.Typer(
     help="[EXPERIMENTAL, UNVERIFIED] Manage a connected iPhone/iPad live, over USB. "
     "Built without a physical device available to test against — try `fclean device list` first.",
 )
+profile_app = typer.Typer(
+    no_args_is_help=True,
+    help="Save and switch between named scan profiles (scan roots, rule overrides/thresholds, retention).",
+)
+schedule_app = typer.Typer(
+    no_args_is_help=True,
+    help="Run a read-only `scan` on a recurring schedule via macOS launchd. Never schedules "
+    "`clean --apply`/`purge` — those always require an explicit, interactive run.",
+)
 app.add_typer(quarantine_app, name="quarantine")
 app.add_typer(config_app, name="config")
 app.add_typer(backups_app, name="backups")
 app.add_typer(device_app, name="device")
+app.add_typer(profile_app, name="profile")
+app.add_typer(schedule_app, name="schedule")
 
 _NO_COLOR = bool(os.environ.get("NO_COLOR"))
 console = Console(no_color=_NO_COLOR, highlight=False)
@@ -84,6 +97,10 @@ def _load_config() -> dict:
     unknown_overrides = rules_mod.unknown_override_ids(cfg)
     for rid in unknown_overrides:
         err_console.print(f"[yellow]Warning:[/yellow] rule_overrides has unknown rule id {esc(rid)!r} (typo?)")
+    for rid in rules_mod.unknown_param_override_ids(cfg):
+        err_console.print(
+            f"[yellow]Warning:[/yellow] rule_param_overrides has unknown rule id {esc(rid)!r} (typo?)"
+        )
     try:
         rules_mod.load_custom_rules(cfg)
     except rules_mod.RuleError as exc:
@@ -114,8 +131,9 @@ def _run_scan(
 
     progress = None
     if show_progress and sys.stderr.isatty():
-        def progress(msg: str) -> None:  # noqa: E306
-            err_console.print(f"[dim]{msg}[/dim]", end="\r")
+        def progress(msg: str, percent: float | None) -> None:  # noqa: E306
+            prefix = f"[{percent:5.1f}%] " if percent is not None else ""
+            err_console.print(f"[dim]{prefix}{msg}[/dim]", end="\r")
 
     try:
         result = scanner.run_scan(
@@ -230,7 +248,7 @@ def scan(
         output_mod.emit(result)
     else:
         _print_scan_result(result)
-    audit_mod.log_action("scan", {"candidate_count": len(result.candidates), "total_size": result.total_size})
+    audit_mod.log_scan(result)
 
 
 @app.command()
@@ -417,6 +435,37 @@ def quarantine_sessions(as_json: bool = typer.Option(False, "--json")) -> None:
     for s in sessions:
         table.add_row(s.session_id, str(s.count), fmt.human_size(s.size_bytes), fmt.short_timestamp(s.first_timestamp))
     console.print(table)
+
+
+@quarantine_app.command("history")
+def quarantine_history(
+    days: int = typer.Option(30, "--days", help="How many days of by-day history to show."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Full history of everything ever quarantined — by category and by day — including
+    items later restored or purged (unlike `quarantine list`/`sessions`, which only cover
+    what's currently in quarantine)."""
+    cfg = _load_config()
+    by_category = quarantine_mod.history_by_category(cfg)
+    by_day = quarantine_mod.history_by_day(cfg, days=days)
+    if as_json:
+        output_mod.emit({"by_category": by_category, "by_day": by_day})
+        return
+    cat_table = Table(title="All-time by category")
+    cat_table.add_column("Category")
+    cat_table.add_column("Items", justify="right")
+    cat_table.add_column("Size", justify="right")
+    for row in by_category:
+        cat_table.add_row(esc(row["category"]), str(row["count"]), fmt.human_size(row["size_bytes"]))
+    console.print(cat_table)
+
+    day_table = Table(title=f"Last {days} days")
+    day_table.add_column("Date")
+    day_table.add_column("Items", justify="right")
+    day_table.add_column("Size", justify="right")
+    for row in by_day:
+        day_table.add_row(row["date"], str(row["count"]), fmt.human_size(row["size_bytes"]))
+    console.print(day_table)
 
 
 @quarantine_app.command("purge")
@@ -848,6 +897,121 @@ def tui() -> None:
 
 
 # --------------------------------------------------------------------------
+# profile
+# --------------------------------------------------------------------------
+
+
+@profile_app.command("list")
+def profile_list(as_json: bool = typer.Option(False, "--json")) -> None:
+    cfg = _load_config()
+    active = cfg.get("active_profile") or None
+    names = profiles_mod.list_profiles()
+    if as_json:
+        output_mod.emit({"active_profile": active, "profiles": names})
+        return
+    if not names:
+        console.print("No saved profiles. Create one with `fclean profile save <name>`.")
+        return
+    table = Table(title="Scan profiles")
+    table.add_column("Name")
+    table.add_column("Active")
+    for name in names:
+        table.add_row(esc(name), "yes" if name == active else "")
+    console.print(table)
+
+
+@profile_app.command("save")
+def profile_save(name: str) -> None:
+    """Save the current scan roots / rule overrides & thresholds / retention / hash settings as a profile."""
+    cfg = _load_config()
+    try:
+        profiles_mod.save_profile(name, cfg)
+    except profiles_mod.ProfileError as exc:
+        raise CliError(str(exc)) from exc
+    console.print(f"Saved profile {esc(name)!r}.")
+
+
+@profile_app.command("apply")
+def profile_apply(name: str) -> None:
+    """Apply a saved profile onto the current config and make it the active profile."""
+    cfg = _load_config()
+    try:
+        merged = profiles_mod.apply_profile(cfg, name)
+    except (profiles_mod.ProfileError, config_mod.ConfigError) as exc:
+        raise CliError(str(exc)) from exc
+    merged["active_profile"] = name
+    config_mod.save_config(merged)
+    console.print(f"Applied profile {esc(name)!r}.")
+
+
+@profile_app.command("show")
+def profile_show(name: str, as_json: bool = typer.Option(False, "--json")) -> None:
+    try:
+        data = profiles_mod.load_profile(name)
+    except profiles_mod.ProfileError as exc:
+        raise CliError(str(exc)) from exc
+    if as_json:
+        output_mod.emit({"name": name, **data})
+        return
+    console.print(f"Profile {esc(name)!r}:")
+    for key, value in data.items():
+        console.print(f"  {esc(key)}: {esc(str(value))}")
+
+
+@profile_app.command("delete")
+def profile_delete(name: str) -> None:
+    cfg = _load_config()
+    removed = profiles_mod.delete_profile(name)
+    if not removed:
+        console.print(f"[yellow]No such profile: {esc(name)}[/yellow]")
+        return
+    if cfg.get("active_profile") == name:
+        cfg["active_profile"] = ""
+        config_mod.save_config(cfg)
+    console.print(f"Deleted profile {esc(name)!r}.")
+
+
+# --------------------------------------------------------------------------
+# schedule
+# --------------------------------------------------------------------------
+
+
+@schedule_app.command("enable")
+def schedule_enable(
+    every_hours: int = typer.Option(24, "--every-hours", help="How often to run a read-only scan."),
+) -> None:
+    """Install a macOS LaunchAgent that runs `fclean scan --json` on a schedule.
+    Only ever scans — never applies a clean or purges anything."""
+    try:
+        path = schedule_mod.enable(every_hours=every_hours)
+    except schedule_mod.ScheduleError as exc:
+        raise CliError(str(exc)) from exc
+    console.print(f"Scheduled a read-only scan every {every_hours}h. LaunchAgent: {esc(str(path))}")
+
+
+@schedule_app.command("disable")
+def schedule_disable() -> None:
+    removed = schedule_mod.disable()
+    if removed:
+        console.print("Scheduled scan disabled and removed.")
+    else:
+        console.print("[yellow]No scheduled scan was installed.[/yellow]")
+
+
+@schedule_app.command("status")
+def schedule_status(as_json: bool = typer.Option(False, "--json")) -> None:
+    info = schedule_mod.status()
+    if as_json:
+        output_mod.emit(info)
+        return
+    if not info["installed"]:
+        console.print("No scheduled scan installed. Set one up with `fclean schedule enable`.")
+        return
+    console.print(f"Plist: {esc(info['plist_path'])}")
+    console.print(f"Loaded: {'yes' if info['loaded'] else 'no'}")
+
+
+# --------------------------------------------------------------------------
 # config
 # --------------------------------------------------------------------------
 
@@ -877,11 +1041,17 @@ def config_show(as_json: bool = typer.Option(False, "--json")) -> None:
     table.add_column("Enabled")
     table.add_column("Risk")
     table.add_column("Description", overflow="fold")
+    effective_by_id = {r.id: r for r in rules_mod.apply_param_overrides(list(rules_mod.all_rules(cfg)), cfg)}
     for rule in rules_mod.all_rules(cfg):
         enabled = config_mod.is_rule_enabled(cfg, rule.id, rule.enabled_by_default)
         risk_style = RISK_STYLE.get(rule.risk, "")
+        effective = effective_by_id[rule.id]
+        overridden = effective != rule
+        id_suffix = " [dim](custom)[/dim]" if rule.source == "custom" else ""
+        if overridden:
+            id_suffix += f" [cyan](age>={effective.min_age_days}d, size>={fmt.human_size(effective.min_size_bytes)})[/cyan]"
         table.add_row(
-            esc(rule.id) + (" [dim](custom)[/dim]" if rule.source == "custom" else ""),
+            esc(rule.id) + id_suffix,
             esc(rule.category),
             "yes" if enabled else "no",
             f"[{risk_style}]{esc(rule.risk)}[/{risk_style}]" if risk_style else esc(rule.risk),
@@ -908,6 +1078,40 @@ def config_disable(rule_id: str) -> None:
     cfg.setdefault("rule_overrides", {})[rule_id] = False
     config_mod.save_config(cfg)
     console.print(f"Disabled rule: {esc(rule_id)}")
+
+
+@config_app.command("threshold")
+def config_threshold(
+    rule_id: str,
+    min_age_days: int | None = typer.Option(
+        None, "--min-age-days", help="Override this rule's minimum age, in days."
+    ),
+    min_size_bytes: int | None = typer.Option(
+        None, "--min-size-bytes", help="Override this rule's minimum size, in bytes."
+    ),
+) -> None:
+    """Override a rule's min_age_days/min_size_bytes without redefining it as a custom rule."""
+    cfg = _load_config()
+    if rule_id not in rules_mod.rules_by_id(cfg):
+        raise CliError(f"Unknown rule id: {rule_id}")
+    if min_age_days is None and min_size_bytes is None:
+        raise CliError("Pass --min-age-days and/or --min-size-bytes.")
+    entry = config_mod.set_rule_param_override(
+        cfg, rule_id, min_age_days=min_age_days, min_size_bytes=min_size_bytes
+    )
+    config_mod.save_config(cfg)
+    console.print(f"Threshold override for {esc(rule_id)}: {entry}")
+
+
+@config_app.command("clear-threshold")
+def config_clear_threshold(rule_id: str) -> None:
+    cfg = _load_config()
+    removed = config_mod.clear_rule_param_override(cfg, rule_id)
+    config_mod.save_config(cfg)
+    if removed:
+        console.print(f"Cleared threshold override for {esc(rule_id)}.")
+    else:
+        console.print(f"[yellow]No threshold override set for {esc(rule_id)}.[/yellow]")
 
 
 @config_app.command("keep")

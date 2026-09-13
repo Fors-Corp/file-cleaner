@@ -113,7 +113,57 @@ class TestSetValue:
         with pytest.raises(config_mod.ConfigError):
             config_mod.set_value(cfg, "does_not_exist", "1")
 
-    def test_structured_keys_rejected(self, sandbox_home):
+    @pytest.mark.parametrize("key", ["rule_overrides", "rules", "rule_param_overrides"])
+    def test_structured_keys_rejected(self, sandbox_home, key):
         cfg = config_mod.default_config()
         with pytest.raises(config_mod.ConfigError):
-            config_mod.set_value(cfg, "rule_overrides", "system_caches=true")
+            config_mod.set_value(cfg, key, "system_caches=true")
+
+
+class TestRuleParamOverrides:
+    def test_valid_override_accepted(self, sandbox_home):
+        cfg = config_mod.default_config()
+        cfg["rule_param_overrides"] = {"system_caches": {"min_age_days": 14}}
+        config_mod.validate_config(cfg)
+        assert cfg["rule_param_overrides"]["system_caches"]["min_age_days"] == 14
+
+    def test_unknown_field_rejected(self, sandbox_home):
+        cfg = config_mod.default_config()
+        cfg["rule_param_overrides"] = {"system_caches": {"bogus_field": 1}}
+        with pytest.raises(config_mod.ConfigError):
+            config_mod.validate_config(cfg)
+
+    def test_negative_value_rejected(self, sandbox_home):
+        cfg = config_mod.default_config()
+        cfg["rule_param_overrides"] = {"system_caches": {"min_age_days": -1}}
+        with pytest.raises(config_mod.ConfigError):
+            config_mod.validate_config(cfg)
+
+    def test_get_set_clear_round_trip(self, sandbox_home):
+        cfg = config_mod.default_config()
+        config_mod.set_rule_param_override(cfg, "system_caches", min_age_days=14)
+        assert config_mod.get_rule_param_override(cfg, "system_caches") == {"min_age_days": 14}
+        # Setting one field again leaves the other untouched.
+        config_mod.set_rule_param_override(cfg, "system_caches", min_size_bytes=1024)
+        assert config_mod.get_rule_param_override(cfg, "system_caches") == {
+            "min_age_days": 14,
+            "min_size_bytes": 1024,
+        }
+        assert config_mod.clear_rule_param_override(cfg, "system_caches") is True
+        assert config_mod.clear_rule_param_override(cfg, "system_caches") is False
+
+
+class TestScanConcurrency:
+    def test_default_is_positive(self, sandbox_home):
+        assert config_mod.default_config()["scan_concurrency"] >= 1
+
+    def test_zero_rejected(self, sandbox_home):
+        cfg = config_mod.default_config()
+        cfg["scan_concurrency"] = 0
+        with pytest.raises(config_mod.ConfigError):
+            config_mod.validate_config(cfg)
+
+    def test_settable_from_cli_value(self, sandbox_home):
+        cfg = config_mod.default_config()
+        config_mod.set_value(cfg, "scan_concurrency", "8")
+        assert cfg["scan_concurrency"] == 8

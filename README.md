@@ -198,19 +198,35 @@ tool — that is **not** restorable by File Cleaner (only by reinstalling the ap
 
 ## The interactive TUI
 
-`fclean tui` launches a full-screen browser: select candidates, see live disk usage, and
-confirm before anything moves. Everything is keyboard-driven — the footer always shows the
-active bindings, and none of it is mouse-only:
+`fclean tui` launches a full-screen browser across four tabs — **Scan**, **Rules**,
+**Profiles**, **Stats** — plus a pushed **Quarantine** screen. Everything is
+keyboard-driven — the footer always shows the active bindings, and none of it is
+mouse-only:
 
 | Key | Action |
 |---|---|
 | ↑ / ↓ | Move the highlight |
-| Space | Toggle the highlighted item |
-| `a` / `n` | Select all / select none |
-| `x` | Quarantine the selected items (opens a confirm dialog) |
+| Space | Toggle the highlighted item (select a candidate; enable/disable a rule) |
+| `a` / `n` | Select all / select none (Scan and Rules tabs) |
+| `x` | Quarantine the selected items (Scan tab; opens a confirm dialog) |
+| `e` | Edit the highlighted rule's thresholds (Rules tab) |
+| `s` | Save the current config as a new named profile (Profiles tab) |
+| `d` | Delete the highlighted profile (Profiles tab) |
 | `u` | Open the quarantine/restore screen |
-| `r` | Rescan (main screen) / restore selected (quarantine screen) |
+| `r` | Rescan (Scan tab) / restore selected (Quarantine screen) |
 | `q` | Quit |
+
+**Scan** is the original candidate browser: select matches, see live disk usage, and
+confirm before anything moves — a percentage tracks real progress against a quick,
+cheap directory-count pre-pass, not just a spinner. **Rules** lists every builtin and
+custom rule with its category, risk, and effective thresholds; toggling one writes
+straight to `rule_overrides`, and `e` opens a small dialog to override a rule's
+`min_age_days`/`min_size_bytes` without redefining it as a custom rule (leaving a field
+blank clears that override). **Profiles** lists saved profiles (see
+[Scan profiles](#scan-profiles) below) — `enter` applies the highlighted one, `s` saves
+the current config as a new one. **Stats** shows what's currently in quarantine, an
+all-time breakdown by category, and the most recent entries from the audit log — reusing
+the manifest and audit trail that already exist rather than a separate history store.
 
 The confirm dialog never defaults to "yes": focus starts on **Cancel**, so pressing Enter
 without deliberately tabbing to **Confirm** safely cancels. Escape always cancels
@@ -281,13 +297,62 @@ volume_local_quarantine = true                           # quarantine external-v
 protected_paths = []                                     # populated by `config keep`
 scan_roots = []                                           # empty = home dir + external volumes
 rule_overrides = {}                                        # rule_id -> true/false
+rule_param_overrides = {}                                   # rule_id -> {min_age_days = .., min_size_bytes = ..}
+scan_concurrency = 4                                          # max (rule, root) walks run in parallel during a scan
 hash_duplicates_max_bytes = 2000000000                       # skip hashing files bigger than this
+active_profile = ""                                            # set by `fclean profile apply <name>`
 # rules = [[ ... ]]                                            # custom rules — see "Custom rules" above
 ```
 
 Edit directly, or via `fclean config set <key> <value>` / `config enable|disable <rule-id>` /
-`config keep|unkeep <path>`. An invalid config (bad TOML, wrong value type, an unknown rule
-id in `rule_overrides`) is reported clearly rather than silently ignored or crashing.
+`config keep|unkeep <path>` / `config threshold <rule-id> [--min-age-days N] [--min-size-bytes N]`
+(and `config clear-threshold <rule-id>` to remove an override). An invalid config (bad TOML,
+wrong value type, an unknown rule id in `rule_overrides`/`rule_param_overrides`) is reported
+clearly rather than silently ignored or crashing.
+
+Scanning is I/O-bound (mostly `os.scandir`/`stat` syscalls), so `run_scan` walks every
+selected rule's `(rule, root)` target concurrently in a bounded thread pool — `scan_concurrency`
+sets how many run at once. This matters in practice because rules vary hugely in cost: a
+couple of rules (like the built-in `.DS_Store` cleanup rule) walk the *entire* scan root
+recursively, while most others only look at one small, specific directory — running them
+sequentially meant the cheap rules sat idle behind the expensive one. `duplicates`/`large-files`
+hashing is parallelized the same way, and reuses the same setting.
+
+## Scan profiles
+
+A profile is a named, saved snapshot of `scan_roots`, `rule_overrides`,
+`rule_param_overrides`, `retention_days`, and `hash_duplicates_max_bytes` — everything else
+(quarantine location, protected paths, etc.) always comes from the base config regardless of
+which profile is active. Useful for switching between, say, a fast "quick" pass and a
+thorough "deep" one, or a profile scoped to external drives only.
+
+```bash
+fclean profile save quick        # save the current config's tracked keys under this name
+fclean profile list                 # list saved profiles, marking the active one
+fclean profile apply quick             # layer "quick"'s keys onto the config and make it active
+fclean profile show quick                 # print what's stored in a profile
+fclean profile delete quick                  # remove it
+```
+
+The same actions are available from the TUI's **Profiles** tab (`enter` to apply, `s` to
+save, `d` to delete).
+
+## Scheduling scans
+
+`fclean schedule enable` installs a macOS LaunchAgent that runs `fclean scan --json` on a
+recurring interval — output goes to a log file under `~/.filecleaner/schedule/`, and each run
+feeds the same audit trail (and so the same Stats tab) as a scan you run yourself.
+
+```bash
+fclean schedule enable --every-hours 24
+fclean schedule status
+fclean schedule disable
+```
+
+This is deliberately scoped to the read-only `scan` command — it will never schedule
+`clean --apply` or `purge`. Those stay an explicit, interactive decision every time, which is
+the whole point of this app's confirm-before-anything-moves design; unattended automation
+that could quarantine or delete things on its own would defeat that.
 
 ## Development
 
@@ -306,23 +371,25 @@ filesystem, and never require a real iPhone or real MobileSync backups. CI (GitH
 ## Architecture, and where this could go next
 
 The codebase is layered as a dependency-free **engine** — `models`, `config`, `safety`,
-`rules`, `scanner`, `duplicates`, `largefiles`, `quarantine`, `plan`, `audit` — with two
-thin front-ends on top of it: the Typer CLI (`cli.py`) and the Textual TUI (`tui.py`). The
-engine never imports either front-end, every mutating call returns a structured result
-(`ScanResult`, `ActionResult`) rather than printing directly, and `output.py` turns any of
-that into the JSON documents `--json` emits. That separation is what makes `--json` and the
-plan/apply workflow possible without duplicating logic between the CLI and the TUI.
+`rules`, `scanner`, `duplicates`, `largefiles`, `quarantine`, `plan`, `audit`, `profiles`,
+`schedule` — with two thin front-ends on top of it: the Typer CLI (`cli.py`) and the
+Textual TUI (`tui.py`). The engine never imports either front-end, every mutating call
+returns a structured result (`ScanResult`, `ActionResult`) rather than printing directly,
+and `output.py` turns any of that into the JSON documents `--json` emits. That separation
+is what makes `--json` and the plan/apply workflow possible without duplicating logic
+between the CLI and the TUI — it's also what let the **Rules**/**Profiles**/**Stats** TUI
+tabs and `fclean schedule` reuse the same engine functions the CLI's `config`/`profile`
+commands and `scan` already used, rather than growing a second implementation.
 
-The natural next step, building on that same seam: a small **background agent** (a
-`launchd` user agent, since this is macOS-only anyway) that runs `scan` on a schedule and
-posts a native notification when reclaimable space crosses a threshold — no polling from a
-foreground app needed. Paired with a lightweight **menu-bar app** (SwiftUI, talking to the
-existing engine either by shelling out to `fclean --json` or, for tighter integration, via
-a small XPC service wrapping the same Python engine), that would give File Cleaner a
-proper always-available macOS presence — live free-space and quarantine-size next to the
-clock — while the CLI and TUI stay exactly as useful for anyone who prefers a terminal.
-Nothing about the current engine/front-end split needs to change to build that; it is
-already the seam such an app would plug into.
+The background-agent idea from earlier versions of this doc is now `fclean schedule` —
+a `launchd` user agent that runs a read-only `scan` on an interval (see
+[Scheduling scans](#scheduling-scans)). What's still a natural next step, building on the
+same seam: a lightweight **menu-bar app** (SwiftUI, talking to the existing engine either
+by shelling out to `fclean --json` or, for tighter integration, via a small XPC service
+wrapping the same Python engine) that posts a native notification when reclaimable space
+crosses a threshold and shows live free-space/quarantine-size next to the clock — no
+polling from a foreground app needed. Nothing about the current engine/front-end split
+needs to change to build that; it is already the seam such an app would plug into.
 
 ## Known limitations
 

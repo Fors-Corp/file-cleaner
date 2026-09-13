@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from filecleaner.config import get_audit_log_path
+from filecleaner.models import ScanResult
 
 MAX_LOG_BYTES = 10 * 1024 * 1024
 
@@ -41,6 +42,21 @@ def log_action(action: str, details: dict[str, Any]) -> None:
     path = get_audit_log_path()
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, default=str) + "\n")
+
+
+def log_scan(result: ScanResult) -> None:
+    """Record a scan action: aggregate count/size plus the same per-category
+    breakdown ``ScanResult.to_dict()`` already computes, so scan history
+    feeds the stats dashboard without any extra bookkeeping. Shared by the
+    CLI and TUI so both front-ends log scans identically."""
+    log_action(
+        "scan",
+        {
+            "candidate_count": len(result.candidates),
+            "total_size": result.total_size,
+            "categories": result.to_dict()["categories"],
+        },
+    )
 
 
 def read_audit_log(

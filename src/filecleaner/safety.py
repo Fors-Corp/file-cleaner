@@ -10,6 +10,7 @@ at scan time, so protected paths are never even *reported*.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -68,34 +69,40 @@ HOME_DENY_SUBPATHS: tuple[str, ...] = (
 
 _VOLUME_CACHE_TTL_SECONDS = 5.0
 _volume_cache: tuple[float, list[Path]] | None = None
+_volume_cache_lock = threading.Lock()
 
 
 def _volume_roots() -> list[Path]:
     """Mounted volume roots, cached briefly: this is called once per
     candidate and ``/Volumes`` does not change between two consecutive
-    calls in the same scan."""
+    calls in the same scan. Scanning now walks multiple rules/roots
+    concurrently (see ``scanner._run_targets``), so this can be called from
+    several threads at once — the lock keeps the cache's read-check-write
+    from racing."""
     global _volume_cache
-    now = time.monotonic()
-    if _volume_cache is not None and now - _volume_cache[0] < _VOLUME_CACHE_TTL_SECONDS:
-        return _volume_cache[1]
+    with _volume_cache_lock:
+        now = time.monotonic()
+        if _volume_cache is not None and now - _volume_cache[0] < _VOLUME_CACHE_TTL_SECONDS:
+            return _volume_cache[1]
 
-    roots = [Path("/")]
-    volumes = Path("/Volumes")
-    if volumes.is_dir():
-        try:
-            for entry in volumes.iterdir():
-                if entry.is_dir() or entry.is_symlink():
-                    roots.append(entry)
-        except OSError:
-            pass
-    _volume_cache = (now, roots)
-    return roots
+        roots = [Path("/")]
+        volumes = Path("/Volumes")
+        if volumes.is_dir():
+            try:
+                for entry in volumes.iterdir():
+                    if entry.is_dir() or entry.is_symlink():
+                        roots.append(entry)
+            except OSError:
+                pass
+        _volume_cache = (now, roots)
+        return roots
 
 
 def reset_caches() -> None:
     """Forget cached mount information (tests, or after a volume change)."""
     global _volume_cache
-    _volume_cache = None
+    with _volume_cache_lock:
+        _volume_cache = None
 
 
 def _self_protected_paths() -> list[Path]:

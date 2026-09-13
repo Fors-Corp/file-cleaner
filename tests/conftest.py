@@ -8,6 +8,7 @@ import pytest
 
 from filecleaner import config as config_mod
 from filecleaner import safety as safety_mod
+from filecleaner import schedule as schedule_mod
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +40,8 @@ def sandbox_home(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "DATA_DIR", fake_data_dir)
     monkeypatch.setattr(config_mod, "DEFAULT_QUARANTINE_DIR", fake_data_dir / "quarantine")
     monkeypatch.setattr(config_mod, "AUDIT_LOG_PATH", fake_data_dir / "audit.log")
+    # Never let a test write a real LaunchAgent, even if it forgets to mock launchctl.
+    monkeypatch.setattr(schedule_mod, "LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
 
     return fake_home
 

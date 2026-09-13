@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -79,12 +80,16 @@ def find_duplicates(
                     continue
                 size_buckets.setdefault(size, []).append(file_path)
 
+    max_workers = config.get("scan_concurrency", 4)
+
+    # Same-size candidates only — hashing is CPU/IO work per file, and
+    # hashlib's OpenSSL backend releases the GIL for it, so a thread pool
+    # gives real parallelism here instead of hashing one file at a time.
+    partial_candidates = [(size, path) for size, paths in size_buckets.items() if len(paths) >= 2 for path in paths]
     partial_buckets: dict[tuple[int, str], list[Path]] = {}
-    for size, paths in size_buckets.items():
-        if len(paths) < 2:
-            continue
-        for path in paths:
-            partial = _partial_hash(path)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        partial_hashes = pool.map(_partial_hash, (path for _size, path in partial_candidates))
+        for (size, path), partial in zip(partial_candidates, partial_hashes, strict=True):
             if partial is None:
                 continue
             partial_buckets.setdefault((size, partial), []).append(path)
@@ -92,16 +97,22 @@ def find_duplicates(
     if progress is not None:
         progress("comparing full contents of same-size candidates…")
 
-    groups: list[DuplicateGroup] = []
-    for (size, _partial), paths in partial_buckets.items():
-        if len(paths) < 2 or size > max_hash_bytes:
-            continue
-        full_buckets: dict[str, list[Path]] = {}
-        for path in paths:
-            full = _full_hash(path)
+    full_candidates = [
+        (size, path)
+        for (size, _partial), paths in partial_buckets.items()
+        if len(paths) >= 2 and size <= max_hash_bytes
+        for path in paths
+    ]
+    full_hashes_by_size: dict[int, dict[str, list[Path]]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        full_hashes = pool.map(_full_hash, (path for _size, path in full_candidates))
+        for (size, path), full in zip(full_candidates, full_hashes, strict=True):
             if full is None:
                 continue
-            full_buckets.setdefault(full, []).append(path)
+            full_hashes_by_size.setdefault(size, {}).setdefault(full, []).append(path)
+
+    groups: list[DuplicateGroup] = []
+    for size, full_buckets in full_hashes_by_size.items():
         for full_hash, group_paths in full_buckets.items():
             if len(group_paths) > 1:
                 groups.append(DuplicateGroup(sha256=full_hash, size_bytes=size, paths=sorted(group_paths)))

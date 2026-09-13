@@ -28,9 +28,11 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +42,7 @@ from filecleaner import safety
 from filecleaner.models import Candidate, Rule, ScanResult
 from filecleaner.volumes import default_scan_roots
 
-ProgressCallback = Callable[[str], None]
+ProgressCallback = Callable[[str, float | None], None]
 
 _MAX_ERRORS = 200
 _PROGRESS_EVERY_DIRS = 250
@@ -175,6 +177,36 @@ def dir_stats(path: Path) -> tuple[int, float]:
 
 
 @dataclass
+class _ScanCounter:
+    """Directories walked so far across the *entire* scan (every rule, every
+    root) plus the total predicted by a prior counting pass, if any.
+
+    Shared by reference across every ``_WalkContext`` created during one
+    ``run_scan`` call, so percent-complete reflects overall progress rather
+    than resetting at each rule or root. Rule/root walks now run concurrently
+    (see ``_run_targets``), so ``done`` is incremented from multiple threads —
+    the lock makes that read-modify-write safe.
+    """
+
+    done: int = 0
+    total: int | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def increment(self) -> None:
+        with self._lock:
+            self.done += 1
+
+    def percent(self) -> float | None:
+        if not self.total:
+            return None
+        # Directories can appear or disappear between the counting pass and
+        # the real scan (e.g. a browser writes new cache subfolders), so the
+        # live count can creep past the earlier estimate — clamp rather than
+        # show a nonsensical >100%.
+        return min(100.0, 100.0 * self.done / self.total)
+
+
+@dataclass
 class _WalkContext:
     rule: Rule
     base: Path
@@ -184,6 +216,8 @@ class _WalkContext:
     result: ScanResult
     progress: ProgressCallback | None
     now: float
+    counter: _ScanCounter
+    count_only: bool = False
     dirs_seen: int = 0
 
     def is_excluded(self, rel: str) -> bool:
@@ -195,8 +229,9 @@ class _WalkContext:
 
     def tick(self, rel: str) -> None:
         self.dirs_seen += 1
+        self.counter.increment()
         if self.progress is not None and self.dirs_seen % _PROGRESS_EVERY_DIRS == 0:
-            self.progress(f"{self.rule.label}: scanning {rel or '.'}")
+            self.progress(f"{self.rule.label}: scanning {rel or '.'}", self.counter.percent())
 
 
 def _iter_dir(path: str) -> Iterator[os.DirEntry[str]]:
@@ -242,14 +277,15 @@ def _walk_rule_pattern(ctx: _WalkContext) -> None:
             matched = ctx.matcher.matches(rel)
             if is_dir:
                 if matched and ctx.rule.kind == "dir":
-                    _emit(ctx, Path(entry.path), is_dir=True)
+                    if not ctx.count_only:
+                        _emit(ctx, Path(entry.path), is_dir=True)
                     continue  # never descend into something we already report as a whole
                 if entry.name in _NEVER_DESCEND:
                     continue
                 if ctx.matcher.max_depth is None or depth + 1 < ctx.matcher.max_depth:
                     stack.append((entry.path, rel, depth + 1))
                 continue
-            if matched and ctx.rule.kind == "file":
+            if matched and ctx.rule.kind == "file" and not ctx.count_only:
                 _emit(ctx, Path(entry.path), is_dir=False)
 
 
@@ -290,8 +326,14 @@ def scan_rule(
     *,
     progress: ProgressCallback | None = None,
     now: float | None = None,
+    counter: _ScanCounter | None = None,
+    count_only: bool = False,
 ) -> None:
-    """Evaluate one rule against one root, appending matches to ``result``."""
+    """Evaluate one rule against one root, appending matches to ``result``.
+
+    ``count_only`` skips the (comparatively expensive) stat/emit step and
+    just walks directories, for ``count_total_dirs``'s pre-pass.
+    """
     try:
         if not base.is_dir():
             return
@@ -308,6 +350,8 @@ def scan_rule(
             result=result,
             progress=progress,
             now=time.time() if now is None else now,
+            counter=counter if counter is not None else _ScanCounter(),
+            count_only=count_only,
         )
         _walk_rule_pattern(ctx)
 
@@ -353,13 +397,116 @@ def select_rules(
         unknown = sorted(only_rules - known)
         if unknown:
             raise UnknownRuleError(f"unknown rule id(s): {', '.join(unknown)}")
-        return [r for r in available if r.id in only_rules]
+        return rules_mod.apply_param_overrides([r for r in available if r.id in only_rules], config)
     selected: list[Rule] = []
     for rule in available:
         enabled = config_mod.is_rule_enabled(config, rule.id, rule.enabled_by_default)
         if enabled or include_disabled:
             selected.append(rule)
-    return selected
+    return rules_mod.apply_param_overrides(selected, config)
+
+
+def _scan_setup(
+    config: dict[str, Any], extra_excludes: tuple[Path, ...] = ()
+) -> tuple[Path, list[Path], bool, list[Path], tuple[Path, ...]]:
+    home = Path.home()
+    roots = default_scan_roots(config.get("scan_roots") or [])
+    home_in_roots = any(_same_path(r, home) for r in roots)
+    volume_roots = [r for r in roots if not _same_path(r, home)]
+    extra_protected = (
+        config_mod.extra_protected_paths(config) + config_mod.data_paths_to_protect(config) + tuple(extra_excludes)
+    )
+    return home, roots, home_in_roots, volume_roots, extra_protected
+
+
+def _iter_targets(
+    selected: list[Rule], home: Path, home_in_roots: bool, volume_roots: list[Path]
+) -> Iterator[tuple[Rule, Path]]:
+    """Every (rule, root) pair a scan will walk, in the order it will walk them."""
+    for rule in selected:
+        if rule.scope == "home":
+            if home_in_roots:
+                yield rule, home
+        elif rule.scope == "each_volume":
+            for vol_root in volume_roots:
+                yield rule, vol_root
+
+
+def _locked_progress(progress: ProgressCallback) -> ProgressCallback:
+    """Serialize calls to a progress callback that will now be invoked from
+    multiple worker threads at once — callers (a Rich ``\\r`` printer, a
+    Textual ``call_from_thread``) were written assuming one caller at a time."""
+    lock = threading.Lock()
+
+    def wrapped(message: str, percent: float | None) -> None:
+        with lock:
+            progress(message, percent)
+
+    return wrapped
+
+
+def _run_targets(
+    targets: list[tuple[Rule, Path]],
+    extra_protected: tuple[Path, ...],
+    *,
+    progress: ProgressCallback | None,
+    counter: _ScanCounter,
+    count_only: bool,
+    max_workers: int,
+) -> tuple[list[Candidate], list[str]]:
+    """Run every ``(rule, root)`` walk concurrently — this is I/O-bound work
+    (``os.scandir``/``stat`` syscalls), and CPython releases the GIL for
+    those, so a thread pool gives real wall-clock parallelism without the
+    complexity of multiprocessing. Each task gets its own ``ScanResult`` (no
+    lock needed on the hot per-directory/per-file path); results are merged
+    afterwards in submission order, so output stays identical to a
+    sequential run — only faster."""
+    if not targets:
+        return [], []
+    locked_progress = _locked_progress(progress) if progress is not None else None
+
+    def _run_one(rule: Rule, root: Path) -> ScanResult:
+        if locked_progress is not None:
+            locked_progress(f"{rule.label}…", counter.percent())
+        partial = ScanResult(scan_roots=[])
+        scan_rule(root, rule, partial, extra_protected, progress=locked_progress, counter=counter, count_only=count_only)
+        return partial
+
+    candidates: list[Candidate] = []
+    errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_run_one, rule, root) for rule, root in targets]
+        for future in futures:
+            partial = future.result()
+            candidates.extend(partial.candidates)
+            errors.extend(partial.errors)
+    return candidates, errors
+
+
+def count_total_dirs(
+    config: dict[str, Any],
+    *,
+    only_rules: set[str] | None = None,
+    include_disabled: bool = False,
+    extra_excludes: tuple[Path, ...] = (),
+    rules: tuple[Rule, ...] | None = None,
+) -> int:
+    """Pre-pass: walk every directory a real scan would visit, without
+    stat-ing matches, so ``run_scan`` can report true percent-complete.
+
+    This is meaningfully cheaper than a real scan (no per-file ``stat``
+    calls, no recursive size totals for matched directories) but it is not
+    free — it still touches every directory a scan would. Call it only
+    where the resulting percentage is worth that extra walk (the TUI's
+    scan screen), not on every CLI invocation.
+    """
+    selected = select_rules(config, only_rules=only_rules, include_disabled=include_disabled, rules=rules)
+    home, _roots, home_in_roots, volume_roots, extra_protected = _scan_setup(config, extra_excludes)
+    targets = list(_iter_targets(selected, home, home_in_roots, volume_roots))
+    counter = _ScanCounter()
+    max_workers = config.get("scan_concurrency", 4)
+    _run_targets(targets, extra_protected, progress=None, counter=counter, count_only=True, max_workers=max_workers)
+    return counter.done
 
 
 def run_scan(
@@ -370,36 +517,34 @@ def run_scan(
     extra_excludes: tuple[Path, ...] = (),
     progress: ProgressCallback | None = None,
     rules: tuple[Rule, ...] | None = None,
+    total_dirs: int | None = None,
 ) -> ScanResult:
     """Run every selected rule over the configured roots and return the
-    coalesced, safety-filtered candidates."""
+    coalesced, safety-filtered candidates. ``(rule, root)`` walks run
+    concurrently, bounded by the ``scan_concurrency`` config key.
+
+    ``total_dirs`` — typically from a prior ``count_total_dirs`` call — lets
+    ``progress`` report a real percent-complete instead of just a message;
+    omit it (the default) to get messages with no percentage, as before.
+    """
     started = time.monotonic()
     selected = select_rules(config, only_rules=only_rules, include_disabled=include_disabled, rules=rules)
-
-    home = Path.home()
-    roots = default_scan_roots(config.get("scan_roots") or [])
-    home_in_roots = any(_same_path(r, home) for r in roots)
-    volume_roots = [r for r in roots if not _same_path(r, home)]
+    home, roots, home_in_roots, volume_roots, extra_protected = _scan_setup(config, extra_excludes)
+    targets = list(_iter_targets(selected, home, home_in_roots, volume_roots))
 
     result = ScanResult(scan_roots=list(roots))
-    extra_protected = (
-        config_mod.extra_protected_paths(config) + config_mod.data_paths_to_protect(config) + tuple(extra_excludes)
-    )
+    counter = _ScanCounter(total=total_dirs)
+    max_workers = config.get("scan_concurrency", 4)
 
-    for rule in selected:
-        if progress is not None:
-            progress(f"{rule.label}…")
-        if rule.scope == "home":
-            if home_in_roots:
-                scan_rule(home, rule, result, extra_protected, progress=progress)
-        elif rule.scope == "each_volume":
-            for vol_root in volume_roots:
-                scan_rule(vol_root, rule, result, extra_protected, progress=progress)
+    result.candidates, result.errors = _run_targets(
+        targets, extra_protected, progress=progress, counter=counter, count_only=False, max_workers=max_workers
+    )
+    result.errors = result.errors[:_MAX_ERRORS]
 
     result.candidates, result.overlaps_dropped = coalesce(result.candidates)
     result.duration_seconds = time.monotonic() - started
     if progress is not None:
-        progress(f"Done: {len(result.candidates)} candidates")
+        progress(f"Done: {len(result.candidates)} candidates", 100.0 if total_dirs else None)
     return result
 
 

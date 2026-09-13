@@ -450,3 +450,37 @@ def overall_summary(config: dict[str, Any]) -> tuple[int, int]:
     """(item_count, total_bytes) currently sitting in quarantine."""
     entries = list_entries(config)
     return len(entries), sum(e.size_bytes for e in entries)
+
+
+def history_by_category(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Total quarantined size/count per category, across *every* entry ever
+    quarantined — restored or purged or still sitting there. Unlike
+    ``overall_summary``/``list_sessions`` (which only look at what's
+    currently in quarantine), this is the full history, for a stats
+    dashboard's "biggest categories" view."""
+    conn = _connect(config)
+    try:
+        rows = conn.execute(
+            "SELECT category, COUNT(*) as n, SUM(size_bytes) as total "
+            "FROM quarantine_entries GROUP BY category ORDER BY total DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{"category": r["category"], "count": r["n"], "size_bytes": r["total"] or 0} for r in rows]
+
+
+def history_by_day(config: dict[str, Any], *, days: int = 30) -> list[dict[str, Any]]:
+    """Total quarantined size/count per day for the last ``days`` days,
+    across every entry ever quarantined (not just what's still there).
+    Days with no activity are omitted, not zero-filled."""
+    conn = _connect(config)
+    try:
+        rows = conn.execute(
+            "SELECT substr(timestamp, 1, 10) as day, SUM(size_bytes) as total, COUNT(*) as n "
+            "FROM quarantine_entries WHERE timestamp >= date('now', ?) "
+            "GROUP BY day ORDER BY day ASC",
+            (f"-{days} days",),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{"date": r["day"], "size_bytes": r["total"] or 0, "count": r["n"]} for r in rows]

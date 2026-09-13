@@ -1,4 +1,5 @@
-"""Interactive terminal browser: an ncdu-style view over cleanup candidates.
+"""Interactive terminal browser: an ncdu-style view over cleanup candidates,
+plus Rules/Profiles/Stats tabs for customization and history.
 
 Accessibility & responsiveness notes
 -------------------------------------
@@ -26,6 +27,13 @@ single word in brackets), which would misrepresent — or entirely hide part
 of — the exact path about to be moved. All such content is therefore
 wrapped in ``rich.text.Text`` (never a bare ``str``), which Textual renders
 as literal text with no markup parsing at all.
+
+Tab layout: the main screen is a ``TabbedContent`` (Scan / Rules / Profiles
+/ Stats). All four tabs are mounted at once — Textual keeps inactive
+``TabPane`` content in the DOM and just hides it — so widget ids like
+``#candidates``/``#status`` stay queryable regardless of which tab is
+active. The Quarantine view stays a separate pushed ``Screen`` (unchanged),
+reachable with "u" from any tab.
 """
 
 from __future__ import annotations
@@ -36,20 +44,36 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid
+from textual.containers import Grid, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Header, Label, SelectionList, Static
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    Label,
+    OptionList,
+    SelectionList,
+    Sparkline,
+    Static,
+    TabbedContent,
+    TabPane,
+)
+from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
+from filecleaner import audit as audit_mod
 from filecleaner import config as config_mod
 from filecleaner import format as fmt
+from filecleaner import profiles as profiles_mod
 from filecleaner import quarantine as quarantine_mod
+from filecleaner import rules as rules_mod
 from filecleaner import scanner
 from filecleaner import volumes as volumes_mod
-from filecleaner.models import Candidate, QuarantineEntry, ScanResult
+from filecleaner.models import Candidate, QuarantineEntry, Rule, ScanResult
 
 _DIALOG_CSS = """
-ConfirmScreen {
+ConfirmScreen, TextPromptScreen, ThresholdScreen {
     align: center middle;
 }
 #dialog {
@@ -67,6 +91,13 @@ ConfirmScreen {
     column-span: 2;
     content-align: center middle;
     padding: 1 0;
+}
+#prompt_inputs {
+    column-span: 2;
+    height: auto;
+}
+#prompt_input {
+    column-span: 2;
 }
 """
 
@@ -106,6 +137,96 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class TextPromptScreen(ModalScreen[str | None]):
+    """A single-line text prompt (e.g. "name this profile"). Escape or
+    "Cancel" returns None; "Confirm" returns the (stripped) input text,
+    which may be empty — callers validate that themselves."""
+
+    CSS = _DIALOG_CSS
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, message: str, *, initial: str = "") -> None:
+        super().__init__()
+        self.message = message
+        self.initial = initial
+
+    def compose(self) -> ComposeResult:
+        yield Grid(
+            Label(self.message, id="question"),
+            Input(value=self.initial, id="prompt_input"),
+            Button("Cancel", variant="primary", id="no"),
+            Button("Confirm", variant="success", id="yes"),
+            id="dialog",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#prompt_input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self._submit(event.button.id == "yes")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit(True)
+
+    def _submit(self, confirmed: bool) -> None:
+        if not confirmed:
+            self.dismiss(None)
+            return
+        self.dismiss(self.query_one("#prompt_input", Input).value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ThresholdScreen(ModalScreen[tuple[int | None, int | None] | None]):
+    """Edit one rule's min_age_days/min_size_bytes override. An empty field
+    means "no override for this field" (clears any existing one); Cancel or
+    Escape returns None and changes nothing."""
+
+    CSS = _DIALOG_CSS
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, rule: Rule, effective: Rule) -> None:
+        super().__init__()
+        self.rule = rule
+        self.effective = effective
+
+    def compose(self) -> ComposeResult:
+        yield Grid(
+            Label(f"Thresholds for {self.rule.id}", id="question"),
+            Vertical(
+                Label("Min age (days), blank = no override:"),
+                Input(value=str(self.effective.min_age_days), id="age_input"),
+                Label("Min size (bytes), blank = no override:"),
+                Input(value=str(self.effective.min_size_bytes), id="size_input"),
+                id="prompt_inputs",
+            ),
+            Button("Cancel", variant="primary", id="no"),
+            Button("Save", variant="success", id="yes"),
+            id="dialog",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#age_input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "yes":
+            self.dismiss(None)
+            return
+        age_text = self.query_one("#age_input", Input).value.strip()
+        size_text = self.query_one("#size_input", Input).value.strip()
+        try:
+            age = int(age_text) if age_text else None
+            size = int(size_text) if size_text else None
+        except ValueError:
+            self.notify("Enter whole numbers only.", severity="error")
+            return
+        self.dismiss((age, size))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 def _candidate_label(cand: Candidate) -> Text:
     risk_tag = {"low": "", "medium": " ⚠", "high": " ⚠⚠"}.get(cand.risk, "")
     kind = "dir " if cand.is_dir else "file"
@@ -115,6 +236,15 @@ def _candidate_label(cand: Candidate) -> Text:
 def _entry_label(entry: QuarantineEntry) -> Text:
     availability = "" if entry.is_available else "  (unavailable — volume unplugged?)"
     return Text(f"{fmt.human_size(entry.size_bytes):>10}  {fmt.short_timestamp(entry.timestamp)}  {entry.original_path}{availability}")
+
+
+def _rule_label(rule: Rule, effective: Rule) -> Text:
+    risk_tag = {"low": "[low]", "medium": "[medium]", "high": "[high]"}.get(rule.risk, "")
+    overridden = " (custom thresholds)" if effective != rule else ""
+    return Text(
+        f"{rule.category:<12}  {risk_tag:<10}  {rule.id}{overridden}  "
+        f"age>={effective.min_age_days}d size>={fmt.human_size(effective.min_size_bytes)}"
+    )
 
 
 class QuarantineScreen(Screen):
@@ -180,7 +310,7 @@ class QuarantineScreen(Screen):
 
 
 class FileCleanerApp(App[None]):
-    """The main screen: scan, review, select, quarantine."""
+    """Scan / Rules / Profiles / Stats tabs, plus a pushed Quarantine screen."""
 
     TITLE = "File Cleaner"
     CSS = """
@@ -194,6 +324,15 @@ class FileCleanerApp(App[None]):
         padding: 0 1;
         color: $text-muted;
     }
+    #rules_help, #profiles_help, #stats_summary {
+        height: auto;
+        padding: 1 1;
+        color: $text-muted;
+    }
+    #stats_sparkline {
+        height: 5;
+        margin: 1 1;
+    }
     """
     BINDINGS = [
         Binding("r", "rescan", "Rescan"),
@@ -205,6 +344,9 @@ class FileCleanerApp(App[None]):
         # would silently never fire while the list has focus — exactly
         # where it has focus almost all the time.
         Binding("x", "quarantine_selected", "Quarantine selected"),
+        Binding("e", "edit_threshold", "Edit thresholds (Rules tab)"),
+        Binding("s", "save_profile", "Save profile (Profiles tab)"),
+        Binding("d", "delete_profile", "Delete profile (Profiles tab)"),
         Binding("u", "show_quarantine", "Quarantine/Restore"),
         Binding("q", "quit", "Quit"),
     ]
@@ -214,31 +356,69 @@ class FileCleanerApp(App[None]):
         self.config: dict[str, Any] = config_mod.load_config()
         self.scan_result: ScanResult | None = None
         self.candidate_by_key: dict[str, Candidate] = {}
+        self.rule_by_index: dict[int, Rule] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(id="volume_summary")
-        yield Static(id="status")
-        yield SelectionList(id="candidates")
+        with TabbedContent(initial="tab-scan"):
+            with TabPane("Scan", id="tab-scan"):
+                yield Static(id="volume_summary")
+                yield Static(id="status")
+                yield SelectionList(id="candidates")
+            with TabPane("Rules", id="tab-rules"):
+                yield Static(id="rules_help")
+                yield SelectionList(id="rules_list")
+            with TabPane("Profiles", id="tab-profiles"):
+                yield Static(id="profiles_help")
+                yield OptionList(id="profiles_list")
+            with TabPane("Stats", id="tab-stats"):
+                yield Static(id="stats_summary")
+                yield Sparkline([], id="stats_sparkline")
         yield Footer()
 
     def on_mount(self) -> None:
         self._refresh_volume_summary()
+        self._refresh_rules_list()
+        self._refresh_profiles_list()
+        self._refresh_stats()
         self.action_rescan()
 
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        # Data behind Rules/Profiles/Stats can go stale while another tab was
+        # active (a scan just ran, a profile was applied elsewhere) — refresh
+        # on activation rather than trying to invalidate every write site.
+        if event.pane.id == "tab-rules":
+            self._refresh_rules_list()
+        elif event.pane.id == "tab-profiles":
+            self._refresh_profiles_list()
+        elif event.pane.id == "tab-stats":
+            self._refresh_stats()
+
+    def _active_tab(self) -> str:
+        return self.query_one(TabbedContent).active
+
+    # ---------------------------------------------------------------- Scan
+
     def action_rescan(self) -> None:
+        if self._active_tab() != "tab-scan":
+            self.notify("Switch to the Scan tab to rescan.")
+            return
         self.query_one("#status", Static).update("Scanning…")
         self.query_one("#candidates", SelectionList).clear_options()
         self._scan()
 
     @work(exclusive=True, thread=True)
     def _scan(self) -> None:
-        def progress(message: str) -> None:
+        def progress(message: str, percent: float | None) -> None:
             # message embeds a relative filesystem path — wrap in Text (see
             # module docstring) so it can never be mistaken for markup.
-            self.call_from_thread(self.query_one("#status", Static).update, Text(message))
+            label = f"[{percent:5.1f}%] {message}" if percent is not None else message
+            self.call_from_thread(self.query_one("#status", Static).update, Text(label))
 
-        result = scanner.run_scan(self.config, progress=progress)
+        self.call_from_thread(self.query_one("#status", Static).update, Text("Estimating scan size…"))
+        total_dirs = scanner.count_total_dirs(self.config)
+        result = scanner.run_scan(self.config, progress=progress, total_dirs=total_dirs)
+        audit_mod.log_scan(result)
         self.call_from_thread(self._on_scan_done, result)
 
     def _on_scan_done(self, result: ScanResult) -> None:
@@ -276,12 +456,6 @@ class FileCleanerApp(App[None]):
             self.candidate_by_key[key] = cand
             selection_list.add_option(Selection(_candidate_label(cand), key, False))
 
-    def action_select_all(self) -> None:
-        self.query_one("#candidates", SelectionList).select_all()
-
-    def action_select_none(self) -> None:
-        self.query_one("#candidates", SelectionList).deselect_all()
-
     def action_show_quarantine(self) -> None:
         self.push_screen(QuarantineScreen())
 
@@ -291,6 +465,8 @@ class FileCleanerApp(App[None]):
         # await on — without `@work` here, Textual raises `NoActiveWorker`
         # the moment this runs, since the key-binding dispatcher invokes
         # action methods directly rather than as a worker task.
+        if self._active_tab() != "tab-scan":
+            return
         selection_list = self.query_one("#candidates", SelectionList)
         selected = [self.candidate_by_key[k] for k in selection_list.selected]
         if not selected:
@@ -312,6 +488,179 @@ class FileCleanerApp(App[None]):
             message += f" {len(action.skipped)} skipped."
         self.notify(message)
         self.action_rescan()
+
+    # --------------------------------------------------------------- Rules
+
+    def _refresh_rules_list(self) -> None:
+        self.config = config_mod.load_config()
+        selection_list = self.query_one("#rules_list", SelectionList)
+        selection_list.clear_options()
+        self.rule_by_index = {}
+        all_rules = sorted(rules_mod.all_rules(self.config), key=lambda r: (r.category, r.id))
+        effective_by_id = {r.id: r for r in rules_mod.apply_param_overrides(list(all_rules), self.config)}
+        for i, rule in enumerate(all_rules):
+            self.rule_by_index[i] = rule
+            enabled = config_mod.is_rule_enabled(self.config, rule.id, rule.enabled_by_default)
+            effective = effective_by_id[rule.id]
+            selection_list.add_option(Selection(_rule_label(rule, effective), rule.id, enabled))
+        self.query_one("#rules_help", Static).update(
+            f"{len(all_rules)} rule(s) — space toggles enabled/disabled, e edits thresholds for the highlighted rule"
+        )
+
+    def on_selection_list_selection_toggled(self, event: SelectionList.SelectionToggled) -> None:
+        if event.selection_list.id != "rules_list":
+            return
+        rule_id = event.selection.value
+        enabled = rule_id in event.selection_list.selected
+        self.config.setdefault("rule_overrides", {})[rule_id] = enabled
+        config_mod.save_config(self.config)
+
+    def action_edit_threshold(self) -> None:
+        if self._active_tab() != "tab-rules":
+            return
+        selection_list = self.query_one("#rules_list", SelectionList)
+        index = selection_list.highlighted
+        if index is None or index not in self.rule_by_index:
+            self.notify("Highlight a rule first.")
+            return
+        rule = self.rule_by_index[index]
+        effective = rules_mod.apply_param_overrides([rule], self.config)[0]
+        self._prompt_threshold(rule, effective)
+
+    @work(exclusive=True)
+    async def _prompt_threshold(self, rule: Rule, effective: Rule) -> None:
+        result = await self.push_screen_wait(ThresholdScreen(rule, effective))
+        if result is None:
+            return
+        age, size = result
+        if age is None and size is None:
+            config_mod.clear_rule_param_override(self.config, rule.id)
+        else:
+            config_mod.set_rule_param_override(self.config, rule.id, min_age_days=age, min_size_bytes=size)
+        config_mod.save_config(self.config)
+        self._refresh_rules_list()
+        self.notify(f"Updated thresholds for {rule.id}.")
+
+    # ------------------------------------------------------------ Profiles
+
+    def _refresh_profiles_list(self) -> None:
+        self.config = config_mod.load_config()
+        option_list = self.query_one("#profiles_list", OptionList)
+        option_list.clear_options()
+        active = self.config.get("active_profile") or None
+        names = profiles_mod.list_profiles()
+        for name in names:
+            marker = " (active)" if name == active else ""
+            option_list.add_option(Option(f"{name}{marker}", id=name))
+        self.query_one("#profiles_help", Static).update(
+            f"{len(names)} saved profile(s) — enter applies the highlighted profile, "
+            "s saves the current config as a new profile, d deletes the highlighted one"
+        )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "profiles_list" or event.option.id is None:
+            return
+        name = event.option.id
+        try:
+            merged = profiles_mod.apply_profile(self.config, name)
+        except (profiles_mod.ProfileError, config_mod.ConfigError) as exc:
+            self.notify(str(exc), severity="error")
+            return
+        merged["active_profile"] = name
+        config_mod.save_config(merged)
+        self.config = merged
+        self._refresh_profiles_list()
+        self._refresh_rules_list()
+        self.notify(f"Applied profile {name!r}. Rescan to see it take effect.")
+
+    def action_save_profile(self) -> None:
+        if self._active_tab() != "tab-profiles":
+            return
+        self._prompt_save_profile()
+
+    @work(exclusive=True)
+    async def _prompt_save_profile(self) -> None:
+        name = await self.push_screen_wait(TextPromptScreen("Save current config as profile named:"))
+        if not name:
+            return
+        try:
+            profiles_mod.save_profile(name, self.config)
+        except profiles_mod.ProfileError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self._refresh_profiles_list()
+        self.notify(f"Saved profile {name!r}.")
+
+    def action_delete_profile(self) -> None:
+        if self._active_tab() != "tab-profiles":
+            return
+        option_list = self.query_one("#profiles_list", OptionList)
+        index = option_list.highlighted
+        if index is None:
+            self.notify("Highlight a profile first.")
+            return
+        option = option_list.get_option_at_index(index)
+        if option.id is None:
+            return
+        self._confirm_delete_profile(option.id)
+
+    @work(exclusive=True)
+    async def _confirm_delete_profile(self, name: str) -> None:
+        confirmed = await self.push_screen_wait(ConfirmScreen(f"Delete profile {name!r}?"))
+        if not confirmed:
+            return
+        profiles_mod.delete_profile(name)
+        if self.config.get("active_profile") == name:
+            self.config["active_profile"] = ""
+            config_mod.save_config(self.config)
+        self._refresh_profiles_list()
+        self.notify(f"Deleted profile {name!r}.")
+
+    # --------------------------------------------------------------- Stats
+
+    def _refresh_stats(self) -> None:
+        cfg = config_mod.load_config()
+        item_count, total_bytes = quarantine_mod.overall_summary(cfg)
+        by_category = quarantine_mod.history_by_category(cfg)
+        by_day = quarantine_mod.history_by_day(cfg, days=30)
+        recent = audit_mod.read_audit_log(limit=10)
+
+        lines = [
+            f"Currently in quarantine: {item_count} item(s), {fmt.human_size(total_bytes)}",
+            "",
+            "All-time by category:",
+        ]
+        for row in by_category[:8]:
+            lines.append(f"  {row['category']:<12} {row['count']:>5} item(s)  {fmt.human_size(row['size_bytes'])}")
+        if not by_category:
+            lines.append("  (nothing quarantined yet)")
+        lines.append("")
+        lines.append("Recent activity:")
+        for entry in reversed(recent):
+            action = entry.get("action", "?")
+            ts = fmt.short_timestamp(entry.get("timestamp", ""))
+            lines.append(f"  {ts}  {action}")
+        if not recent:
+            lines.append("  (nothing logged yet)")
+
+        self.query_one("#stats_summary", Static).update("\n".join(lines))
+        self.query_one("#stats_sparkline", Sparkline).data = [row["size_bytes"] for row in by_day] or [0]
+
+    # ------------------------------------------------------------- Shared
+
+    def action_select_all(self) -> None:
+        tab = self._active_tab()
+        if tab == "tab-scan":
+            self.query_one("#candidates", SelectionList).select_all()
+        elif tab == "tab-rules":
+            self.query_one("#rules_list", SelectionList).select_all()
+
+    def action_select_none(self) -> None:
+        tab = self._active_tab()
+        if tab == "tab-scan":
+            self.query_one("#candidates", SelectionList).deselect_all()
+        elif tab == "tab-rules":
+            self.query_one("#rules_list", SelectionList).deselect_all()
 
 
 def run_tui() -> None:

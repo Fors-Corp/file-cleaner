@@ -5,6 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-13
+
+Richer TUI (Rules/Profiles/Stats tabs), per-rule threshold overrides, scan
+profiles, macOS launchd scheduling, a live scan percentage, and concurrent
+scanning/hashing for faster runs on real disks.
+
+### Added
+- The TUI (`fclean tui`) is now a tabbed app: **Scan** (unchanged), **Rules**
+  (browse every rule, toggle enabled/disabled, edit per-rule thresholds),
+  **Profiles** (apply/save/delete saved scan profiles), and **Stats**
+  (current quarantine totals, all-time breakdown by category, recent audit
+  activity) — alongside the existing pushed Quarantine screen.
+- `rule_param_overrides` config key and `fclean config threshold`/
+  `clear-threshold`: override a builtin rule's `min_age_days`/
+  `min_size_bytes` without redefining it as a whole custom rule.
+- Scan profiles (`fclean profile list/save/apply/show/delete`, new
+  `profiles.py`): named, saved snapshots of scan roots, rule
+  overrides/thresholds, retention, and hash limits, switchable without
+  hand-editing `config.toml`.
+- `fclean schedule enable/disable/status` (new `schedule.py`): a macOS
+  LaunchAgent that runs a read-only `scan` on a recurring interval, logged
+  to the same audit trail the Stats tab reads. Deliberately scoped to
+  `scan` only — never `clean --apply`/`purge`.
+- `fclean quarantine history`: all-time totals by category and by day
+  across everything ever quarantined (including restored/purged items),
+  not just what's currently sitting in quarantine.
+- A live, real percentage during `scan`/`tui` (a quick pre-pass counts
+  directories, then progress is reported against that count) instead of
+  just a moving status message.
+
+### Changed
+- `run_scan` now walks each rule's targets concurrently in a bounded thread
+  pool (new `scan_concurrency` config key, default 4) instead of
+  sequentially. Scanning is I/O-bound, and a couple of rules (like the
+  `.DS_Store` cleanup rule) walk an entire scan root recursively while most
+  others check one small directory — running them concurrently means the
+  cheap rules no longer sit blocked behind the expensive ones.
+  `duplicates`/`large-files` hashing is parallelized the same way.
+
+### Fixed
+- `safety._volume_roots()`'s cached mount-point lookup was read/written
+  without a lock; harmless when scanning was sequential, but now that
+  rule/root walks run concurrently it's guarded against a race.
+
 ## [1.0.0] - 2026-09-08
 
 First production release. Rebuilds the scanning, quarantine, and

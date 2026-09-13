@@ -5,9 +5,11 @@ from filecleaner.rules import (
     BUILTIN_RULES,
     RuleError,
     all_rules,
+    apply_param_overrides,
     load_custom_rules,
     rules_by_id,
     unknown_override_ids,
+    unknown_param_override_ids,
 )
 
 
@@ -108,3 +110,31 @@ def test_unknown_override_ids_flags_typos():
     cfg = config_mod.default_config()
     cfg["rule_overrides"] = {"system_caches": False, "sysetm_cachse": True}
     assert unknown_override_ids(cfg) == ["sysetm_cachse"]
+
+
+def test_unknown_param_override_ids_flags_typos():
+    cfg = config_mod.default_config()
+    cfg["rule_param_overrides"] = {"sysetm_cachse": {"min_age_days": 1}}
+    assert unknown_param_override_ids(cfg) == ["sysetm_cachse"]
+
+
+class TestApplyParamOverrides:
+    def test_overrides_thresholds(self):
+        cfg = config_mod.default_config()
+        cfg["rule_param_overrides"] = {"system_caches": {"min_age_days": 99}}
+        rules = apply_param_overrides(list(BUILTIN_RULES), cfg)
+        rule = next(r for r in rules if r.id == "system_caches")
+        assert rule.min_age_days == 99
+
+    def test_untouched_rules_pass_through_unchanged(self):
+        cfg = config_mod.default_config()
+        cfg["rule_param_overrides"] = {"system_caches": {"min_age_days": 99}}
+        rules = apply_param_overrides(list(BUILTIN_RULES), cfg)
+        other = next(r for r in rules if r.id == "logs")
+        original = next(r for r in BUILTIN_RULES if r.id == "logs")
+        assert other is original
+
+    def test_no_overrides_returns_same_list(self):
+        cfg = config_mod.default_config()
+        rules = list(BUILTIN_RULES)
+        assert apply_param_overrides(rules, cfg) is rules

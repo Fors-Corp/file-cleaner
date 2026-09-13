@@ -226,6 +226,103 @@ def test_config_set_invalid_value_errors(sandbox_home):
     assert result.exit_code == 1
 
 
+def test_config_threshold_round_trip(sandbox_home):
+    result = _invoke("config", "threshold", "system_caches", "--min-age-days", "14")
+    assert result.exit_code == 0
+    cfg = json.loads(_invoke("config", "show", "--json").stdout)["config"]
+    assert cfg["rule_param_overrides"]["system_caches"] == {"min_age_days": 14}
+
+    _invoke("config", "clear-threshold", "system_caches")
+    cfg_after = json.loads(_invoke("config", "show", "--json").stdout)["config"]
+    assert "system_caches" not in cfg_after["rule_param_overrides"]
+
+
+def test_config_threshold_unknown_rule_errors(sandbox_home):
+    result = _invoke("config", "threshold", "not_a_rule", "--min-age-days", "1")
+    assert result.exit_code == 1
+
+
+def test_config_threshold_requires_a_field(sandbox_home):
+    result = _invoke("config", "threshold", "system_caches")
+    assert result.exit_code == 1
+
+
+def test_profile_save_list_apply_delete_round_trip(sandbox_home):
+    _invoke("config", "set", "retention_days", "7")
+    assert _invoke("profile", "save", "quick").exit_code == 0
+    listed = json.loads(_invoke("profile", "list", "--json").stdout)
+    assert listed["profiles"] == ["quick"]
+
+    _invoke("config", "set", "retention_days", "30")
+    assert _invoke("profile", "apply", "quick").exit_code == 0
+    cfg = json.loads(_invoke("config", "show", "--json").stdout)["config"]
+    assert cfg["retention_days"] == 7
+    assert cfg["active_profile"] == "quick"
+
+    assert _invoke("profile", "delete", "quick").exit_code == 0
+    listed_after = json.loads(_invoke("profile", "list", "--json").stdout)
+    assert listed_after["profiles"] == []
+
+
+def test_profile_apply_unknown_errors(sandbox_home):
+    result = _invoke("profile", "apply", "does-not-exist")
+    assert result.exit_code == 1
+
+
+def test_schedule_enable_disable_status(sandbox_home, monkeypatch):
+    import subprocess
+
+    from filecleaner import schedule as schedule_mod
+
+    monkeypatch.setattr(
+        schedule_mod,
+        "_launchctl",
+        lambda *args: subprocess.CompletedProcess(args=["launchctl", *args], returncode=0, stdout="", stderr=""),
+    )
+
+    result = _invoke("schedule", "enable", "--every-hours", "6")
+    assert result.exit_code == 0
+
+    status = json.loads(_invoke("schedule", "status", "--json").stdout)
+    assert status["installed"] is True
+
+    assert _invoke("schedule", "disable").exit_code == 0
+    status_after = json.loads(_invoke("schedule", "status", "--json").stdout)
+    assert status_after["installed"] is False
+
+
+def test_schedule_enable_failure_surfaces_as_cli_error(sandbox_home, monkeypatch):
+    import subprocess
+
+    from filecleaner import schedule as schedule_mod
+
+    monkeypatch.setattr(
+        schedule_mod,
+        "_launchctl",
+        lambda *args: subprocess.CompletedProcess(args=["launchctl", *args], returncode=1, stdout="", stderr="boom"),
+    )
+    result = _invoke("schedule", "enable")
+    assert result.exit_code == 1
+
+
+def test_quarantine_history_json(sandbox_home, tmp_path):
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"x" * 42)
+    from filecleaner import quarantine as quarantine_mod
+    from filecleaner.models import Candidate
+
+    cfg = json.loads(_invoke("config", "show", "--json").stdout)["config"]
+    quarantine_mod.quarantine_candidates(
+        [Candidate(path=target, size_bytes=42, is_dir=False, mtime=0.0, rule_id="r", category="Caches", risk="low")],
+        cfg,
+    )
+    result = _invoke("quarantine", "history", "--json")
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["by_category"] == [{"category": "Caches", "count": 1, "size_bytes": 42}]
+    assert len(data["by_day"]) == 1
+
+
 def test_large_files_json(sandbox_home, tmp_path):
     big = sandbox_home / "big.bin"
     big.write_bytes(b"x" * 5000)

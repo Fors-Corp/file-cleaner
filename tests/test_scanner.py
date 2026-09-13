@@ -172,6 +172,68 @@ def test_scan_result_duration_is_recorded(sandbox_config, sandbox_home):
     assert result.duration_seconds >= 0.0
 
 
+def _candidate_key(c):
+    return (str(c.path), c.size_bytes, c.rule_id)
+
+
+@pytest.mark.parametrize("concurrency", [1, 8])
+def test_run_scan_same_results_regardless_of_concurrency(sandbox_config, sandbox_home, age_path, concurrency):
+    """(rule, root) walks now run in a thread pool — results must be
+    identical to a sequential run, just potentially faster."""
+    for i in range(5):
+        cache_dir = sandbox_home / "Library" / "Caches" / f"App{i}"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "data.bin").write_bytes(b"x" * (1000 + i))
+        age_path(cache_dir, days=10)
+        age_path(cache_dir / "data.bin", days=10)
+
+    sandbox_config["scan_concurrency"] = concurrency
+    result = scanner.run_scan(sandbox_config)
+    baseline_config = dict(sandbox_config, scan_concurrency=1)
+    baseline = scanner.run_scan(baseline_config)
+
+    assert sorted(map(_candidate_key, result.candidates)) == sorted(map(_candidate_key, baseline.candidates))
+
+
+def test_run_scan_errors_capped_across_concurrent_tasks(sandbox_config, sandbox_home, monkeypatch):
+    """The global error cap must hold even though errors are now collected
+    from multiple concurrently-running (rule, root) tasks."""
+    import os
+
+    real_scandir = os.scandir
+
+    def flaky_scandir(path):
+        if "blocked" in str(path):
+            raise PermissionError("nope")
+        return real_scandir(path)
+
+    rules = tuple(
+        Rule(
+            id=f"unreadable_probe_{i}",
+            label="probe",
+            category="Test",
+            description="",
+            enabled_by_default=True,
+            risk="low",
+            kind="dir",
+            scope="home",
+            include_globs=(f"blocked{i}/*",),
+        )
+        for i in range(3)
+    )
+    for i in range(3):
+        d = sandbox_home / f"blocked{i}"
+        d.mkdir()
+        (d / "sub").mkdir()
+
+    monkeypatch.setattr(scanner.os, "scandir", flaky_scandir)
+    monkeypatch.setattr(scanner, "_MAX_ERRORS", 2)
+    sandbox_config["scan_concurrency"] = 4
+
+    result = scanner.run_scan(sandbox_config, rules=rules, include_disabled=True)
+    assert len(result.errors) <= 2
+
+
 def test_scan_caps_reported_errors(sandbox_config, sandbox_home, monkeypatch):
     """A rule that hits many unreadable directories should never grow the
     error list without bound."""

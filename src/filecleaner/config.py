@@ -106,6 +106,44 @@ def _check_rules(value: Any, key: str) -> list[dict[str, Any]]:
     return list(value)
 
 
+def _check_positive_int(value: Any, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{key}: expected an integer, got {type(value).__name__}")
+    if value < 1:
+        raise ConfigError(f"{key}: must be >= 1, got {value}")
+    return value
+
+
+def _check_optional_str(value: Any, key: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"{key}: expected a string")
+    return value
+
+
+_PARAM_OVERRIDE_FIELDS = ("min_age_days", "min_size_bytes")
+
+
+def _check_rule_param_overrides(value: Any, key: str) -> dict[str, dict[str, int]]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{key}: expected a table of rule_id = {{min_age_days=.., min_size_bytes=..}}")
+    result: dict[str, dict[str, int]] = {}
+    for rule_id, params in value.items():
+        if not isinstance(params, dict):
+            raise ConfigError(f"{key}.{rule_id}: expected a table")
+        unknown = set(params) - set(_PARAM_OVERRIDE_FIELDS)
+        if unknown:
+            raise ConfigError(
+                f"{key}.{rule_id}: unknown field(s) {sorted(unknown)}; allowed: {list(_PARAM_OVERRIDE_FIELDS)}"
+            )
+        cleaned: dict[str, int] = {}
+        for field_name, raw in params.items():
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                raise ConfigError(f"{key}.{rule_id}.{field_name}: must be a non-negative integer")
+            cleaned[field_name] = raw
+        result[rule_id] = cleaned
+    return result
+
+
 # key -> (default, validator, one-line description shown by `config show`)
 CONFIG_SCHEMA: dict[str, tuple[Any, Callable[[Any, str], Any], str]] = {
     "retention_days": (
@@ -148,6 +186,23 @@ CONFIG_SCHEMA: dict[str, tuple[Any, Callable[[Any, str], Any], str]] = {
         [],
         _check_rules,
         "Custom rules ([[rules]] tables) — see README for the fields.",
+    ),
+    "rule_param_overrides": (
+        {},
+        _check_rule_param_overrides,
+        "rule_id = {min_age_days=.., min_size_bytes=..} to override a builtin rule's thresholds "
+        "without redefining it as a custom rule.",
+    ),
+    "scan_concurrency": (
+        4,
+        _check_positive_int,
+        "Max number of (rule, root) walks to run in parallel during a scan. Scanning is I/O-bound, "
+        "so this can exceed the CPU core count.",
+    ),
+    "active_profile": (
+        "",
+        _check_optional_str,
+        "Name of the currently active scan profile (empty = none / base config only).",
     ),
 }
 
@@ -216,14 +271,7 @@ def load_config(*, warnings: list[str] | None = None) -> dict[str, Any]:
         save_config(defaults)
         return defaults
 
-    try:
-        with CONFIG_FILE.open("rb") as f:
-            loaded = tomllib.load(f)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{CONFIG_FILE} is not valid TOML: {exc}") from exc
-    except OSError as exc:
-        raise ConfigError(f"could not read {CONFIG_FILE}: {exc}") from exc
-
+    loaded = read_toml(CONFIG_FILE)
     merged = {**defaults, **loaded}
     found = validate_config(merged)
     if warnings is not None:
@@ -231,21 +279,39 @@ def load_config(*, warnings: list[str] | None = None) -> dict[str, Any]:
     return merged
 
 
+def read_toml(path: Path) -> dict[str, Any]:
+    """Read one plain TOML file. Shared by config and profile loading so
+    both get the same error handling."""
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"could not read {path}: {exc}") from exc
+
+
+def write_toml_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write ``data`` as TOML (temp file + rename) with 0600
+    permissions. Shared by config and profile saving."""
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=".toml", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(data, f)
+        _secure_file(tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    _secure_file(path)
+
+
 def save_config(config: dict[str, Any]) -> None:
     """Atomically write the config (temp file + rename) with 0600 permissions."""
     ensure_dirs()
     validate_config(config)
-    fd, tmp_name = tempfile.mkstemp(prefix=".config-", suffix=".toml", dir=CONFIG_DIR)
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            tomli_w.dump(config, f)
-        _secure_file(tmp)
-        os.replace(tmp, CONFIG_FILE)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    _secure_file(CONFIG_FILE)
+    write_toml_atomic(CONFIG_FILE, config)
 
 
 def get_quarantine_dir(config: dict[str, Any]) -> Path:
@@ -309,14 +375,42 @@ def remove_keep_path(config: dict[str, Any], path: str) -> bool:
     return False
 
 
+def get_rule_param_override(config: dict[str, Any], rule_id: str) -> dict[str, int]:
+    return dict(config.get("rule_param_overrides", {}).get(rule_id, {}))
+
+
+def set_rule_param_override(
+    config: dict[str, Any], rule_id: str, *, min_age_days: int | None = None, min_size_bytes: int | None = None
+) -> dict[str, int]:
+    """Set one or both threshold overrides for ``rule_id``, leaving any other
+    already-set field on that rule untouched."""
+    overrides = config.setdefault("rule_param_overrides", {})
+    entry = dict(overrides.get(rule_id, {}))
+    if min_age_days is not None:
+        entry["min_age_days"] = min_age_days
+    if min_size_bytes is not None:
+        entry["min_size_bytes"] = min_size_bytes
+    overrides[rule_id] = entry
+    return entry
+
+
+def clear_rule_param_override(config: dict[str, Any], rule_id: str) -> bool:
+    overrides = config.get("rule_param_overrides", {})
+    if rule_id in overrides:
+        del overrides[rule_id]
+        return True
+    return False
+
+
 def set_value(config: dict[str, Any], key: str, raw: str) -> Any:
     """Parse ``raw`` (typed from the command line) into the right type for
     ``key``, validate it, store it and return the parsed value."""
     if key not in CONFIG_SCHEMA:
         raise ConfigError(f"unknown config key {key!r}; valid keys: {', '.join(sorted(CONFIG_SCHEMA))}")
-    if key in ("rule_overrides", "rules"):
+    if key in ("rule_overrides", "rules", "rule_param_overrides"):
         raise ConfigError(
-            f"{key} cannot be set from the command line; use `config enable/disable` or edit {CONFIG_FILE}"
+            f"{key} cannot be set from the command line; use `config enable/disable`, "
+            f"`config threshold`, or edit {CONFIG_FILE}"
         )
     default, validator, _desc = CONFIG_SCHEMA[key]
     text = raw.strip()

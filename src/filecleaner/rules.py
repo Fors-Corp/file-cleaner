@@ -11,6 +11,7 @@ two rules match the same path the more descriptive label wins.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from filecleaner.models import Rule
@@ -394,3 +395,18 @@ def unknown_override_ids(config: dict[str, Any]) -> list[str]:
     """Rule ids referenced in ``rule_overrides`` that no rule defines (typos)."""
     known = rules_by_id(config)
     return sorted(rid for rid in config.get("rule_overrides", {}) if rid not in known)
+
+
+def unknown_param_override_ids(config: dict[str, Any]) -> list[str]:
+    """Rule ids referenced in ``rule_param_overrides`` that no rule defines (typos)."""
+    known = rules_by_id(config)
+    return sorted(rid for rid in config.get("rule_param_overrides", {}) if rid not in known)
+
+
+def apply_param_overrides(rules: list[Rule], config: dict[str, Any]) -> list[Rule]:
+    """Apply ``rule_param_overrides`` (per-rule min_age_days/min_size_bytes
+    tweaks) on top of a rule list, without redefining any rule as custom."""
+    overrides = config.get("rule_param_overrides", {})
+    if not overrides:
+        return rules
+    return [dataclasses.replace(rule, **overrides[rule.id]) if rule.id in overrides else rule for rule in rules]

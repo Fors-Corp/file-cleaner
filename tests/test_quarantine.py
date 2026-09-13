@@ -273,3 +273,65 @@ def test_overall_summary(sandbox_config, sandbox_home):
     target.write_bytes(b"x" * 42)
     quarantine.quarantine_candidates([_make_candidate(target, size=42)], sandbox_config)
     assert quarantine.overall_summary(sandbox_config) == (1, 42)
+
+
+def test_history_by_category_groups_and_sums(sandbox_config, sandbox_home):
+    a = sandbox_home / "Library" / "Caches" / "AppA" / "data.bin"
+    a.parent.mkdir(parents=True)
+    a.write_bytes(b"x" * 10)
+    quarantine.quarantine_candidates([_make_candidate(a, size=10, category="Caches")], sandbox_config)
+
+    b = sandbox_home / "Logs" / "old.log"
+    b.parent.mkdir(parents=True)
+    b.write_bytes(b"y" * 5)
+    quarantine.quarantine_candidates([_make_candidate(b, size=5, category="Logs")], sandbox_config)
+
+    history = {row["category"]: row for row in quarantine.history_by_category(sandbox_config)}
+    assert history["Caches"]["size_bytes"] == 10
+    assert history["Caches"]["count"] == 1
+    assert history["Logs"]["size_bytes"] == 5
+
+
+def test_history_by_category_includes_purged_entries(sandbox_config, sandbox_home):
+    """Unlike overall_summary, history is the full record — purging an item
+    must not erase it from the history view."""
+    target = sandbox_home / "Library" / "Caches" / "App" / "data.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"x" * 42)
+    result = quarantine.quarantine_candidates([_make_candidate(target, size=42)], sandbox_config)
+    quarantine.purge_entries([e.id for e in result.entries], sandbox_config)
+
+    assert quarantine.overall_summary(sandbox_config) == (0, 0)
+    history = quarantine.history_by_category(sandbox_config)
+    assert history == [{"category": "Caches", "count": 1, "size_bytes": 42}]
+
+
+def test_history_by_day_buckets_by_date(sandbox_config, sandbox_home):
+    target = sandbox_home / "Library" / "Caches" / "App" / "data.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"x" * 42)
+    quarantine.quarantine_candidates([_make_candidate(target, size=42)], sandbox_config)
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    history = quarantine.history_by_day(sandbox_config, days=30)
+    assert history == [{"date": today, "size_bytes": 42, "count": 1}]
+
+
+def test_history_by_day_excludes_entries_outside_window(sandbox_config, sandbox_home):
+    import sqlite3
+
+    from filecleaner import config as config_mod
+
+    target = sandbox_home / "Library" / "Caches" / "App" / "data.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"x" * 42)
+    quarantined = quarantine.quarantine_candidates([_make_candidate(target, size=42)], sandbox_config)
+
+    db_path = config_mod.get_manifest_db_path(sandbox_config)
+    conn = sqlite3.connect(db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    conn.execute("UPDATE quarantine_entries SET timestamp = ? WHERE id = ?", (old_ts, quarantined.entries[0].id))
+    conn.commit()
+    conn.close()
+
+    assert quarantine.history_by_day(sandbox_config, days=30) == []
