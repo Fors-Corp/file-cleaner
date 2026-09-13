@@ -42,6 +42,12 @@ def sandbox_home(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "AUDIT_LOG_PATH", fake_data_dir / "audit.log")
     # Never let a test write a real LaunchAgent, even if it forgets to mock launchctl.
     monkeypatch.setattr(schedule_mod, "LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
+    # scanner.run_scan()/count_total_dirs() default their scan root to the
+    # current working directory, not Path.home() — chdir into the fake home
+    # so "scan with no explicit root" in tests means the same "whole-machine"
+    # scan it always has, exactly as it would for a real user running
+    # `fclean scan` from their own home directory.
+    monkeypatch.chdir(fake_home)
 
     return fake_home
 

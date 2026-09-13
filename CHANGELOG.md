@@ -5,6 +5,64 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-13
+
+Smart folder reorganization and real permanent deletion for duplicates and
+installation leftovers.
+
+### Added
+- `fclean organize <path> [--apply] [--by type|date|date-only]`: proposes
+  (and, with `--apply`, performs) sorting loose top-level files into
+  type/date/project subfolders. Existing subfolders are never touched or
+  descended into. Every applied run is undoable
+  (`fclean organize-undo <session>`, sessions listed via
+  `fclean organize-sessions`).
+- A local, online-learning file classifier (`classify.py`): a hand-rolled,
+  zero-dependency multinomial Naive Bayes over hashed filename/extension
+  tokens, seeded with an extension→category prior so it's useful
+  immediately and improves per-user as the TUI's Organize tab (see below)
+  learns from corrections. Never leaves the machine.
+- Project/related-file clustering: files sharing a cleaned-up base name
+  (`report.docx` + `report_v2.docx` + `report copy.docx`) land together in
+  `Projects/<name>/` instead of scattered by type — conservative enough to
+  never merge unrelated sequentially-numbered files (camera exports like
+  `IMG_1234.jpg`/`IMG_1235.jpg` stay separate).
+- macOS screenshot recognition (`Screenshot 2026-09-13 at ....png`) as its
+  own Organize category.
+- `fclean duplicates <path> --apply [--keep oldest|newest|shortest-path]`:
+  **real, permanent deletion** — keeps one copy per duplicate group,
+  quarantines the rest, then immediately purges them. Still fully audited,
+  hash-verified, and deny-list-checked; only the 30-day wait is skipped.
+- `fclean leftovers [--kind apps|installers|all] [--apply]`: two opt-in,
+  heuristic detectors — orphaned `~/Library` app-support folders whose
+  owning app is no longer in `/Applications`, and installer archives
+  (`.dmg`/`.pkg`/`.zip`) in Downloads whose product is already installed
+  or extracted. Applying uses the normal quarantine flow (restorable, not
+  immediately purged), since these are heuristic guesses and deserve the
+  full safety net.
+- TUI **Organize** tab: review proposed moves, select and apply them
+  (`m`), or re-categorize the highlighted item (`c`) — which both teaches
+  the local classifier and sticks for the rest of the session.
+
+## [1.2.0] - 2026-09-13
+
+### Added
+- `scan`, `clean`, and `tui` now take an optional directory argument
+  (`fclean scan ~/Downloads`) to scope a run to one folder and its
+  subfolders, instead of always the whole machine.
+
+### Changed
+- **Default scan root changed from the home directory to the current
+  working directory.** Running `fclean scan`/`clean`/`tui` with no
+  argument now scans only the directory you're in — pass your home
+  directory explicitly (e.g. `fclean scan ~`) to get the previous
+  whole-machine behavior (home directory + every external volume).
+  Rules anchored to a specific path under home (browser caches, dev tool
+  caches, etc.) only ever match there, so scoping to an arbitrary folder
+  mainly surfaces `.DS_Store` files and your own custom rules. Scripts
+  that relied on the old no-argument-means-home-and-volumes default
+  should add `~` explicitly.
+
 ## [1.1.0] - 2026-09-13
 
 Richer TUI (Rules/Profiles/Stats tabs), per-rule threshold overrides, scan

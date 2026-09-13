@@ -271,3 +271,58 @@ def test_scan_caps_reported_errors(sandbox_config, sandbox_home, monkeypatch):
     result = ScanResult(scan_roots=[sandbox_home])
     scanner.scan_rule(sandbox_home, rule, result, extra_protected=())
     assert len(result.errors) <= 2
+
+
+class TestRootScoping:
+    """`run_scan`/`count_total_dirs` default their root to the current
+    working directory (not the home directory) — see `sandbox_home`'s
+    `monkeypatch.chdir`, which is why every other test in this module still
+    gets the traditional "scan home" behavior without passing `root`."""
+
+    def test_defaults_to_cwd_not_home(self, tmp_path, sandbox_config, monkeypatch):
+        workdir = tmp_path / "somewhere"
+        workdir.mkdir()
+        monkeypatch.chdir(workdir)
+        sandbox_config["rules"] = [{"id": "logfiles", "include": ["*.log"], "min_age_days": 0}]
+        (workdir / "old.log").write_bytes(b"x" * 10)
+
+        result = scanner.run_scan(sandbox_config, only_rules={"logfiles"}, include_disabled=True)
+
+        assert result.scan_roots == [workdir.resolve()]
+        assert any(c.path == workdir / "old.log" for c in result.candidates)
+
+    def test_explicit_root_overrides_cwd(self, tmp_path, sandbox_config, sandbox_home):
+        other = tmp_path / "other"
+        other.mkdir()
+        sandbox_config["rules"] = [{"id": "logfiles", "include": ["*.log"], "min_age_days": 0}]
+        (other / "old.log").write_bytes(b"x" * 10)
+        # cwd is sandbox_home (chdir'd by the fixture); explicit root wins.
+        result = scanner.run_scan(sandbox_config, only_rules={"logfiles"}, include_disabled=True, root=other)
+
+        assert result.scan_roots == [other.resolve()]
+        assert any(c.path == other / "old.log" for c in result.candidates)
+
+    def test_scoped_root_excludes_each_volume_rules(self, tmp_path, sandbox_config):
+        scoped = tmp_path / "scoped"
+        scoped.mkdir()
+        _root, roots, root_in_roots, volume_roots, _extra = scanner._scan_setup(sandbox_config, root=scoped)
+        assert roots == [scoped.resolve()]
+        assert root_in_roots is True
+        assert volume_roots == []
+
+    def test_home_root_restores_whole_machine_roots(self, sandbox_config, sandbox_home):
+        effective_root, _roots, root_in_roots, _volume_roots, _extra = scanner._scan_setup(
+            sandbox_config, root=sandbox_home
+        )
+        assert effective_root == sandbox_home.resolve()
+        assert root_in_roots is True
+
+    def test_count_total_dirs_respects_root(self, tmp_path, sandbox_config):
+        scoped = tmp_path / "scoped"
+        sub = scoped / "sub"
+        sub.mkdir(parents=True)
+        sandbox_config["rules"] = [{"id": "logfiles", "include": ["**/*.log"], "min_age_days": 0}]
+        (sub / "old.log").write_bytes(b"x" * 10)
+
+        total = scanner.count_total_dirs(sandbox_config, only_rules={"logfiles"}, include_disabled=True, root=scoped)
+        assert total >= 1

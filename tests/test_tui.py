@@ -10,6 +10,7 @@ import pytest
 from textual.widgets import OptionList, SelectionList, TabbedContent
 
 from filecleaner import config as config_mod
+from filecleaner import organize as organize_mod
 from filecleaner import profiles as profiles_mod
 from filecleaner import quarantine as quarantine_mod
 from filecleaner import tui as tui_mod
@@ -34,6 +35,27 @@ async def test_app_launches_and_lists_candidate(cache_item, sandbox_home):
             await pilot.pause()
         selection_list = app.query_one("#candidates", SelectionList)
         assert selection_list.option_count == 1
+
+
+async def test_app_root_param_scopes_scan_to_that_directory(tmp_path, sandbox_home, sandbox_config):
+    """Passing root= to FileCleanerApp scopes the scan to that folder,
+    matching the CLI's `fclean tui <root>` positional argument."""
+    from filecleaner import config as config_mod
+
+    scoped = tmp_path / "scoped"
+    scoped.mkdir()
+    (scoped / "old.log").write_bytes(b"x" * 10)
+    cfg = config_mod.load_config()
+    cfg["rules"] = [{"id": "logfiles", "include": ["*.log"], "min_age_days": 0, "enabled": True}]
+    config_mod.save_config(cfg)
+
+    app = tui_mod.FileCleanerApp(root=scoped)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        while app.scan_result is None:
+            await pilot.pause()
+        assert app.scan_result.scan_roots == [scoped.resolve()]
+        assert any(c.path == scoped / "old.log" for c in app.scan_result.candidates)
 
 
 async def test_bracketed_category_survives_in_selection_label(cache_item, sandbox_home):
@@ -293,3 +315,110 @@ async def test_stats_tab_reflects_quarantine_history(sandbox_home, cache_item):
         summary = app.query_one("#stats_summary").content
         text = summary.plain if hasattr(summary, "plain") else str(summary)
         assert "Caches" in text
+
+
+async def test_organize_tab_lists_proposed_moves(sandbox_home, tmp_path):
+    (tmp_path / "invoice.pdf").write_bytes(b"x")
+    app = tui_mod.FileCleanerApp(root=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-organize"
+        await pilot.pause()
+
+        selection_list = app.query_one("#organize_moves", SelectionList)
+        assert selection_list.option_count == 1
+        label = selection_list.get_option_at_index(0).prompt.plain
+        assert "invoice.pdf" in label
+        assert "Documents" in label
+
+
+async def test_organize_tab_apply_moves_selected_file(sandbox_home, tmp_path):
+    target = tmp_path / "invoice.pdf"
+    target.write_bytes(b"x")
+    app = tui_mod.FileCleanerApp(root=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-organize"
+        await pilot.pause()
+
+        selection_list = app.query_one("#organize_moves", SelectionList)
+        index = next(i for i, m in app.organize_move_by_index.items() if m.path.name == "invoice.pdf")
+        selection_list.select(index)
+        await pilot.pause()
+
+        app.action_apply_organize()
+        await pilot.pause()
+        assert isinstance(app.screen, tui_mod.ConfirmScreen)
+        await pilot.press("tab")
+        await pilot.press("enter")
+        for _ in range(50):
+            await pilot.pause()
+            if not target.exists():
+                break
+
+        assert not target.exists()
+        assert (tmp_path / "Documents" / "invoice.pdf").exists()
+        sessions = organize_mod.list_sessions(app.config)
+        assert len(sessions) == 1
+        assert sessions[0]["count"] == 1
+
+
+async def test_organize_tab_recategorize_records_override(sandbox_home, tmp_path):
+    (tmp_path / "mystery_thing").write_bytes(b"x")
+    app = tui_mod.FileCleanerApp(root=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-organize"
+        await pilot.pause()
+
+        selection_list = app.query_one("#organize_moves", SelectionList)
+        index = next(i for i, m in app.organize_move_by_index.items() if m.path.name == "mystery_thing")
+        selection_list.highlighted = index
+        await pilot.pause()
+
+        app.action_recategorize()
+        await pilot.pause()
+        assert isinstance(app.screen, tui_mod.TextPromptScreen)
+        app.screen.query_one("#prompt_input").value = "Design"
+        await pilot.press("enter")  # Input.Submitted -> confirms directly
+        for _ in range(20):
+            await pilot.pause()
+            if not isinstance(app.screen, tui_mod.TextPromptScreen):
+                break
+
+        assert app.organize_overrides[tmp_path / "mystery_thing"] == "Design"
+        updated_label = app.query_one("#organize_moves", SelectionList).get_option_at_index(0).prompt.plain
+        assert "Design" in updated_label
+
+
+async def test_organize_tab_select_all_and_none(sandbox_home, tmp_path):
+    (tmp_path / "a.pdf").write_bytes(b"x")
+    (tmp_path / "b.pdf").write_bytes(b"x")
+    app = tui_mod.FileCleanerApp(root=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-organize"
+        await pilot.pause()
+
+        app.action_select_all()
+        await pilot.pause()
+        selection_list = app.query_one("#organize_moves", SelectionList)
+        assert len(selection_list.selected) == 2
+
+        app.action_select_none()
+        await pilot.pause()
+        assert len(selection_list.selected) == 0
+
+
+async def test_organize_tab_apply_with_nothing_selected_notifies(sandbox_home, tmp_path):
+    (tmp_path / "invoice.pdf").write_bytes(b"x")
+    app = tui_mod.FileCleanerApp(root=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "tab-organize"
+        await pilot.pause()
+
+        app.action_apply_organize()
+        await pilot.pause()
+        # No confirm dialog should appear since nothing was selected.
+        assert not isinstance(app.screen, tui_mod.ConfirmScreen)

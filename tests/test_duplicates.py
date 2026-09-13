@@ -1,4 +1,8 @@
-from filecleaner import duplicates
+import os
+
+import pytest
+
+from filecleaner import duplicates, models
 
 
 def test_finds_identical_files(tmp_path, sandbox_config):
@@ -57,3 +61,59 @@ def test_two_same_size_duplicate_pairs_stay_separate_groups(tmp_path, sandbox_co
         frozenset({tmp_path / "a1.bin", tmp_path / "a2.bin"}),
         frozenset({tmp_path / "b1.bin", tmp_path / "b2.bin"}),
     }
+
+
+class TestSelectDeletions:
+    def test_keep_oldest_deletes_the_rest(self, tmp_path):
+        older = tmp_path / "older.bin"
+        newer = tmp_path / "newer.bin"
+        older.write_bytes(b"x" * 10)
+        newer.write_bytes(b"x" * 10)
+        os.utime(older, (1000, 1000))
+        os.utime(newer, (2000, 2000))
+        group = models.DuplicateGroup(sha256="abc", size_bytes=10, paths=[older, newer])
+
+        to_delete = duplicates.select_deletions([group], keep="oldest")
+
+        assert to_delete == [newer]
+
+    def test_keep_newest_deletes_the_rest(self, tmp_path):
+        older = tmp_path / "older.bin"
+        newer = tmp_path / "newer.bin"
+        older.write_bytes(b"x" * 10)
+        newer.write_bytes(b"x" * 10)
+        os.utime(older, (1000, 1000))
+        os.utime(newer, (2000, 2000))
+        group = models.DuplicateGroup(sha256="abc", size_bytes=10, paths=[older, newer])
+
+        to_delete = duplicates.select_deletions([group], keep="newest")
+
+        assert to_delete == [older]
+
+    def test_keep_shortest_path(self, tmp_path):
+        short = tmp_path / "a.bin"
+        long = tmp_path / "a_much_longer_name.bin"
+        short.write_bytes(b"x" * 10)
+        long.write_bytes(b"x" * 10)
+        group = models.DuplicateGroup(sha256="abc", size_bytes=10, paths=[short, long])
+
+        to_delete = duplicates.select_deletions([group], keep="shortest-path")
+
+        assert to_delete == [long]
+
+    def test_unknown_strategy_raises(self, tmp_path):
+        group = models.DuplicateGroup(sha256="abc", size_bytes=10, paths=[tmp_path / "a"])
+        with pytest.raises(ValueError, match="unknown keep strategy"):
+            duplicates.select_deletions([group], keep="bogus")
+
+    def test_multiple_groups_each_keep_one(self, tmp_path):
+        paths1 = [tmp_path / "g1_a.bin", tmp_path / "g1_b.bin"]
+        paths2 = [tmp_path / "g2_a.bin", tmp_path / "g2_b.bin", tmp_path / "g2_c.bin"]
+        for p in paths1 + paths2:
+            p.write_bytes(b"x")
+        groups = [
+            models.DuplicateGroup(sha256="a", size_bytes=1, paths=paths1),
+            models.DuplicateGroup(sha256="b", size_bytes=1, paths=paths2),
+        ]
+        to_delete = duplicates.select_deletions(groups, keep="oldest")
+        assert len(to_delete) == 3  # one kept per group: (2-1) + (3-1)

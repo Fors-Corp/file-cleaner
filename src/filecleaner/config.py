@@ -51,6 +51,7 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 DATA_DIR = _data_dir_from_env()
 DEFAULT_QUARANTINE_DIR = DATA_DIR / "quarantine"
 AUDIT_LOG_PATH = DATA_DIR / "audit.log"
+CLASSIFIER_PATH = DATA_DIR / "classifier.json"
 
 # Name of the per-volume quarantine folder created at the root of an
 # external volume when ``volume_local_quarantine`` is on.
@@ -330,6 +331,13 @@ def get_audit_log_path() -> Path:
         AUDIT_LOG_PATH.touch()
     _secure_file(AUDIT_LOG_PATH)
     return AUDIT_LOG_PATH
+
+
+def get_classifier_path() -> Path:
+    """Where the local file-organizer classifier's learned weights live —
+    never anything but aggregate counts, never a filename or path."""
+    ensure_dirs()
+    return CLASSIFIER_PATH
 
 
 def data_paths_to_protect(config: dict[str, Any]) -> tuple[Path, ...]:

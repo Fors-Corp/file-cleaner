@@ -33,10 +33,25 @@ Requires Python 3.11+ and macOS. Also runnable as `python -m filecleaner`.
 
 ```bash
 fclean doctor          # volumes, config, quarantine health, FileVault status — read-only
-fclean scan             # what could be cleaned up, and how much space it'd free — read-only
+fclean scan             # what could be cleaned up in the current directory — read-only
 fclean clean             # same, but with --apply it actually moves matches to quarantine
 fclean tui                 # interactive browser: select items, see live disk usage, confirm
 ```
+
+`scan`, `clean`, and `tui` all take an optional directory argument and default to **the
+current directory** — `fclean scan` scans wherever you run it from, and `fclean scan ~/Downloads`
+(or `cd ~/Downloads && fclean scan`) scopes it to just that folder and its subfolders. Pass
+your home directory to get the traditional whole-machine scan across every external volume
+too:
+
+```bash
+fclean scan ~/Downloads     # just this folder
+fclean scan ~                 # whole machine: home directory + every external volume
+```
+
+Rules anchored to a specific path under home (like browser caches under `Library/Caches/`)
+only ever match there, so scoping to an arbitrary folder mainly surfaces things like stray
+`.DS_Store` files and your own custom rules — see [What gets cleaned](#what-gets-cleaned).
 
 `scan` and `clean` (without `--apply`) never modify anything — they're always safe to run.
 Every command also accepts `--json` for machine-readable output (see
@@ -150,16 +165,77 @@ fclean config unkeep ~/Projects/important-app/node_modules # remove from the kee
 fclean clean --exclude ~/Downloads/tax-docs                # one-off, this run only
 ```
 
-## Duplicates and large files (read-only)
+## Duplicates and large files
 
 ```bash
 fclean duplicates ~/Pictures --top 20     # groups of identical files by content hash
 fclean large-files ~/ --top 50            # biggest files under a path
 ```
 
-Neither command moves anything — review the output and use the TUI or `config keep` /
-manual `mv` to act on it. `large-files` uses a bounded min-heap internally, so memory use
-stays flat no matter how many files a root contains.
+Read-only by default. `large-files` uses a bounded min-heap internally, so memory use stays
+flat no matter how many files a root contains. `duplicates` can also **permanently delete**
+the extra copies:
+
+```bash
+fclean duplicates ~/Pictures --apply --keep oldest
+```
+
+Keeps one copy per group (`--keep oldest`/`newest`/`shortest-path`, default `oldest`) and
+quarantines the rest, then *immediately* purges them — still fully audited, hash-verified,
+and checked against the deny-list, just without the usual 30-day wait, since two
+byte-identical files don't need one. Confirms first unless `--yes` is passed.
+
+## Organizing files
+
+```bash
+fclean organize ~/Downloads                          # dry-run: what would move where
+fclean organize ~/Downloads --apply                   # actually move it
+fclean organize ~/Desktop --apply --by date            # group by year/month instead of type
+fclean organize-sessions                                  # list past runs
+fclean organize-undo <session-id>                            # put one run's files back
+```
+
+Only loose files directly inside the given folder are considered — existing subfolders are
+never touched or descended into, so anything you've already organized by hand is left
+alone. Files land in a category (Documents, Images, Installers, Code, …) chosen by:
+1. **Project clustering** — files sharing a cleaned-up base name (`report.docx` +
+   `report_v2.docx` + `report copy.docx`) land together in `Projects/<name>/`, conservative
+   enough to never merge unrelated sequentially-numbered files (`IMG_1234.jpg`/
+   `IMG_1235.jpg` stay separate — no `.docx`/`.dmg`/etc.-style "version marker" links them).
+2. **A confident extension prior** (`.pdf` → Documents, `.dmg`/`.pkg` → Installers, a
+   macOS screenshot filename → Screenshots).
+3. **A small local classifier** (`classify.py`) for anything else — a hand-rolled,
+   zero-dependency statistical model (no ML framework, no network call, nothing leaves the
+   machine) seeded with the same extension priors so it's useful immediately, and that
+   learns from your corrections in the TUI's **Organize** tab over time. Its guesses come
+   with a confidence score; low-confidence ones are flagged `(low confidence, review)`
+   rather than silently acted on.
+
+Every `--apply` is recorded as a session (same idea as quarantine sessions, separate
+table) so it can be fully undone with `organize-undo`.
+
+## Leftover installation files
+
+```bash
+fclean leftovers                       # both detectors, read-only report
+fclean leftovers --kind apps           # just orphaned ~/Library folders
+fclean leftovers --kind installers     # just already-used installer archives
+fclean leftovers --apply               # quarantine the findings (normal safety net)
+```
+
+Two opt-in, heuristic detectors that cross-reference *other* filesystem state — something
+the glob-based rules can't do:
+- **App leftovers**: subfolders under `~/Library/{Application Support,Caches,Preferences,…}`
+  whose owning app (matched by bundle id, read from every `/Applications/*.app`'s
+  `Info.plist`) is no longer installed.
+- **Installer cleanup**: `.dmg`/`.pkg`/`.zip` files in Downloads whose apparent product
+  already exists — a matching-name installed app, or an already-extracted sibling folder.
+
+Folder-naming heuristics have real false-positive potential (a Mac App Store sandbox
+container, a CLI tool with no `.app` bundle), so results are risk `medium`/`high` — always
+review the list before `--apply`. Applying goes through the *normal* quarantine flow
+(restorable for the usual retention window, not immediately purged like duplicates), since
+these are educated guesses and deserve the full safety net.
 
 ## iPhone/iPad backup management
 
@@ -198,8 +274,8 @@ tool — that is **not** restorable by File Cleaner (only by reinstalling the ap
 
 ## The interactive TUI
 
-`fclean tui` launches a full-screen browser across four tabs — **Scan**, **Rules**,
-**Profiles**, **Stats** — plus a pushed **Quarantine** screen. Everything is
+`fclean tui [path]` launches a full-screen browser across five tabs — **Scan**, **Rules**,
+**Profiles**, **Stats**, **Organize** — plus a pushed **Quarantine** screen. Everything is
 keyboard-driven — the footer always shows the active bindings, and none of it is
 mouse-only:
 
@@ -207,13 +283,15 @@ mouse-only:
 |---|---|
 | ↑ / ↓ | Move the highlight |
 | Space | Toggle the highlighted item (select a candidate; enable/disable a rule) |
-| `a` / `n` | Select all / select none (Scan and Rules tabs) |
+| `a` / `n` | Select all / select none (Scan, Rules, and Organize tabs) |
 | `x` | Quarantine the selected items (Scan tab; opens a confirm dialog) |
 | `e` | Edit the highlighted rule's thresholds (Rules tab) |
 | `s` | Save the current config as a new named profile (Profiles tab) |
 | `d` | Delete the highlighted profile (Profiles tab) |
+| `m` | Move the selected files (Organize tab; opens a confirm dialog) |
+| `c` | Re-categorize the highlighted file (Organize tab) |
 | `u` | Open the quarantine/restore screen |
-| `r` | Rescan (Scan tab) / restore selected (Quarantine screen) |
+| `r` | Rescan (Scan tab) / refresh the plan (Organize tab) / restore selected (Quarantine screen) |
 | `q` | Quit |
 
 **Scan** is the original candidate browser: select matches, see live disk usage, and
@@ -227,6 +305,11 @@ blank clears that override). **Profiles** lists saved profiles (see
 the current config as a new one. **Stats** shows what's currently in quarantine, an
 all-time breakdown by category, and the most recent entries from the audit log — reusing
 the manifest and audit trail that already exist rather than a separate history store.
+**Organize** (see [Organizing files](#organizing-files)) lists the same root's proposed
+moves — select and `m` to apply, or `c` on the highlighted item to override its category,
+which both teaches the local classifier and sticks for the rest of the session (a single
+correction rarely outweighs the seeded prior enough to immediately flip that one file's
+prediction on its own).
 
 The confirm dialog never defaults to "yes": focus starts on **Cancel**, so pressing Enter
 without deliberately tabbing to **Confirm** safely cancels. Escape always cancels

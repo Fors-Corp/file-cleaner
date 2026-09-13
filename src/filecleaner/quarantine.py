@@ -55,18 +55,30 @@ _HASH_CHUNK = 1024 * 1024
 _OVERWRITE_CHUNK = 1024 * 1024
 
 
-def _connect(config: dict[str, Any]) -> sqlite3.Connection:
+def open_manifest_db(
+    config: dict[str, Any], *, schema: str = "", indexes: tuple[str, ...] = ()
+) -> sqlite3.Connection:
+    """Open (creating if needed) the shared local manifest database,
+    applying any additional schema/index statements a caller needs. Shared
+    by quarantine and organize (see ``organize.py``) so both live in one
+    file — already protected via ``config_mod.data_paths_to_protect`` —
+    rather than each managing a separate SQLite database."""
     db_path = config_mod.get_manifest_db_path(config)
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(_SCHEMA)
-    for stmt in _INDEXES:
+    if schema:
+        conn.execute(schema)
+    for stmt in indexes:
         conn.execute(stmt)
     conn.commit()
     with contextlib.suppress(OSError):
         db_path.chmod(0o600)
     return conn
+
+
+def _connect(config: dict[str, Any]) -> sqlite3.Connection:
+    return open_manifest_db(config, schema=_SCHEMA, indexes=_INDEXES)
 
 
 def new_session_id() -> str:

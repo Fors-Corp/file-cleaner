@@ -1,5 +1,6 @@
 """Interactive terminal browser: an ncdu-style view over cleanup candidates,
-plus Rules/Profiles/Stats tabs for customization and history.
+plus Rules/Profiles/Stats/Organize tabs for customization, history, and
+smart folder reorganization.
 
 Accessibility & responsiveness notes
 -------------------------------------
@@ -29,15 +30,26 @@ wrapped in ``rich.text.Text`` (never a bare ``str``), which Textual renders
 as literal text with no markup parsing at all.
 
 Tab layout: the main screen is a ``TabbedContent`` (Scan / Rules / Profiles
-/ Stats). All four tabs are mounted at once — Textual keeps inactive
+/ Stats / Organize). All tabs are mounted at once — Textual keeps inactive
 ``TabPane`` content in the DOM and just hides it — so widget ids like
 ``#candidates``/``#status`` stay queryable regardless of which tab is
 active. The Quarantine view stays a separate pushed ``Screen`` (unchanged),
 reachable with "u" from any tab.
+
+The Organize tab lists ``organize.propose_moves()``'s suggestions for the
+same root the Scan tab scans; "c" on a highlighted item opens a prompt to
+override its category, which both feeds the local classifier
+(``classify.py``) an online-learning example *and* sticks for the rest of
+this session (``self.organize_overrides``) — re-running ``propose_moves``
+after one correction won't necessarily flip that file's prediction back
+immediately (a single example rarely outweighs the seeded prior), so the
+override is applied on top of every subsequent refresh until the tab is
+closed.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
@@ -63,14 +75,15 @@ from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
 from filecleaner import audit as audit_mod
+from filecleaner import classify, scanner
 from filecleaner import config as config_mod
 from filecleaner import format as fmt
+from filecleaner import organize as organize_mod
 from filecleaner import profiles as profiles_mod
 from filecleaner import quarantine as quarantine_mod
 from filecleaner import rules as rules_mod
-from filecleaner import scanner
 from filecleaner import volumes as volumes_mod
-from filecleaner.models import Candidate, QuarantineEntry, Rule, ScanResult
+from filecleaner.models import Candidate, OrganizeMove, QuarantineEntry, Rule, ScanResult
 
 _DIALOG_CSS = """
 ConfirmScreen, TextPromptScreen, ThresholdScreen {
@@ -238,6 +251,14 @@ def _entry_label(entry: QuarantineEntry) -> Text:
     return Text(f"{fmt.human_size(entry.size_bytes):>10}  {fmt.short_timestamp(entry.timestamp)}  {entry.original_path}{availability}")
 
 
+def _organize_label(move: OrganizeMove, root: Path) -> Text:
+    try:
+        rel = move.destination.relative_to(root)
+    except ValueError:
+        rel = move.destination
+    return Text(f"{move.path.name}  ->  {rel}  [{move.confidence:.0%}] ({move.reason})")
+
+
 def _rule_label(rule: Rule, effective: Rule) -> Text:
     risk_tag = {"low": "[low]", "medium": "[medium]", "high": "[high]"}.get(rule.risk, "")
     overridden = " (custom thresholds)" if effective != rule else ""
@@ -310,7 +331,7 @@ class QuarantineScreen(Screen):
 
 
 class FileCleanerApp(App[None]):
-    """Scan / Rules / Profiles / Stats tabs, plus a pushed Quarantine screen."""
+    """Scan / Rules / Profiles / Stats / Organize tabs, plus a pushed Quarantine screen."""
 
     TITLE = "File Cleaner"
     CSS = """
@@ -324,7 +345,7 @@ class FileCleanerApp(App[None]):
         padding: 0 1;
         color: $text-muted;
     }
-    #rules_help, #profiles_help, #stats_summary {
+    #rules_help, #profiles_help, #stats_summary, #organize_help {
         height: auto;
         padding: 1 1;
         color: $text-muted;
@@ -347,16 +368,21 @@ class FileCleanerApp(App[None]):
         Binding("e", "edit_threshold", "Edit thresholds (Rules tab)"),
         Binding("s", "save_profile", "Save profile (Profiles tab)"),
         Binding("d", "delete_profile", "Delete profile (Profiles tab)"),
+        Binding("m", "apply_organize", "Move selected (Organize tab)"),
+        Binding("c", "recategorize", "Re-categorize highlighted (Organize tab)"),
         Binding("u", "show_quarantine", "Quarantine/Restore"),
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, *, root: Path | None = None) -> None:
         super().__init__()
         self.config: dict[str, Any] = config_mod.load_config()
+        self.root = root
         self.scan_result: ScanResult | None = None
         self.candidate_by_key: dict[str, Candidate] = {}
         self.rule_by_index: dict[int, Rule] = {}
+        self.organize_move_by_index: dict[int, OrganizeMove] = {}
+        self.organize_overrides: dict[Path, str] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -374,6 +400,9 @@ class FileCleanerApp(App[None]):
             with TabPane("Stats", id="tab-stats"):
                 yield Static(id="stats_summary")
                 yield Sparkline([], id="stats_sparkline")
+            with TabPane("Organize", id="tab-organize"):
+                yield Static(id="organize_help")
+                yield SelectionList(id="organize_moves")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -381,18 +410,22 @@ class FileCleanerApp(App[None]):
         self._refresh_rules_list()
         self._refresh_profiles_list()
         self._refresh_stats()
+        self._refresh_organize_list()
         self.action_rescan()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        # Data behind Rules/Profiles/Stats can go stale while another tab was
-        # active (a scan just ran, a profile was applied elsewhere) — refresh
-        # on activation rather than trying to invalidate every write site.
+        # Data behind Rules/Profiles/Stats/Organize can go stale while another
+        # tab was active (a scan just ran, a profile was applied elsewhere,
+        # files changed on disk) — refresh on activation rather than trying
+        # to invalidate every write site.
         if event.pane.id == "tab-rules":
             self._refresh_rules_list()
         elif event.pane.id == "tab-profiles":
             self._refresh_profiles_list()
         elif event.pane.id == "tab-stats":
             self._refresh_stats()
+        elif event.pane.id == "tab-organize":
+            self._refresh_organize_list()
 
     def _active_tab(self) -> str:
         return self.query_one(TabbedContent).active
@@ -400,7 +433,11 @@ class FileCleanerApp(App[None]):
     # ---------------------------------------------------------------- Scan
 
     def action_rescan(self) -> None:
-        if self._active_tab() != "tab-scan":
+        tab = self._active_tab()
+        if tab == "tab-organize":
+            self._refresh_organize_list()
+            return
+        if tab != "tab-scan":
             self.notify("Switch to the Scan tab to rescan.")
             return
         self.query_one("#status", Static).update("Scanning…")
@@ -416,8 +453,8 @@ class FileCleanerApp(App[None]):
             self.call_from_thread(self.query_one("#status", Static).update, Text(label))
 
         self.call_from_thread(self.query_one("#status", Static).update, Text("Estimating scan size…"))
-        total_dirs = scanner.count_total_dirs(self.config)
-        result = scanner.run_scan(self.config, progress=progress, total_dirs=total_dirs)
+        total_dirs = scanner.count_total_dirs(self.config, root=self.root)
+        result = scanner.run_scan(self.config, progress=progress, total_dirs=total_dirs, root=self.root)
         audit_mod.log_scan(result)
         self.call_from_thread(self._on_scan_done, result)
 
@@ -431,7 +468,11 @@ class FileCleanerApp(App[None]):
         self.query_one("#status", Static).update(Text(status))
 
     def _refresh_volume_summary(self) -> None:
-        lines = []
+        effective_root = (self.root or Path.cwd()).expanduser().resolve()
+        if effective_root == Path.home().resolve():
+            lines = ["Scanning: home directory + external volumes"]
+        else:
+            lines = [f"Scanning: {effective_root} (pass a root of `~` for the whole-machine scan)"]
         for vol in volumes_mod.list_volumes():
             lines.append(f"{vol.name}: {fmt.human_size(vol.free_bytes)} free / {fmt.human_size(vol.total_bytes)} ({vol.percent_used:.0f}% used)")
         if self.scan_result is not None:
@@ -646,6 +687,83 @@ class FileCleanerApp(App[None]):
         self.query_one("#stats_summary", Static).update("\n".join(lines))
         self.query_one("#stats_sparkline", Sparkline).data = [row["size_bytes"] for row in by_day] or [0]
 
+    # ------------------------------------------------------------ Organize
+
+    def _refresh_organize_list(self) -> None:
+        self.config = config_mod.load_config()
+        effective_root = (self.root or Path.cwd()).expanduser().resolve()
+        selection_list = self.query_one("#organize_moves", SelectionList)
+        selection_list.clear_options()
+        self.organize_move_by_index = {}
+
+        try:
+            moves = organize_mod.propose_moves(effective_root, self.config)
+        except organize_mod.OrganizeError as exc:
+            self.notify(str(exc), severity="error")
+            moves = []
+
+        # Session-local manual corrections (see module docstring) always win
+        # over whatever the classifier currently predicts for that file.
+        for move in moves:
+            override = self.organize_overrides.get(move.path)
+            if override is not None and move.category != override:
+                move.category = override
+                move.destination = effective_root / override / move.path.name
+                move.confidence = 1.0
+                move.reason = "manual"
+
+        for i, move in enumerate(sorted(moves, key=lambda m: str(m.path))):
+            self.organize_move_by_index[i] = move
+            selection_list.add_option(Selection(_organize_label(move, effective_root), str(i), False))
+
+        self.query_one("#organize_help", Static).update(
+            f"{len(moves)} file(s) proposed for {effective_root} — space selects, m moves the selected "
+            "item(s), c re-categorizes the highlighted item, r refreshes the plan"
+        )
+
+    @work(exclusive=True)
+    async def action_apply_organize(self) -> None:
+        if self._active_tab() != "tab-organize":
+            return
+        selection_list = self.query_one("#organize_moves", SelectionList)
+        selected = [self.organize_move_by_index[int(k)] for k in selection_list.selected]
+        if not selected:
+            self.notify("Nothing selected. Press space to select items first.")
+            return
+        confirmed = await self.push_screen_wait(ConfirmScreen(f"Move {len(selected)} file(s) into subfolders?"))
+        if not confirmed:
+            return
+        result = organize_mod.apply_moves(selected, self.config)
+        message = f"Moved {len(result.entries)} item(s)."
+        if result.skipped:
+            message += f" {len(result.skipped)} skipped."
+        self.notify(message)
+        self._refresh_organize_list()
+
+    def action_recategorize(self) -> None:
+        if self._active_tab() != "tab-organize":
+            return
+        selection_list = self.query_one("#organize_moves", SelectionList)
+        index = selection_list.highlighted
+        if index is None or index not in self.organize_move_by_index:
+            self.notify("Highlight a file first.")
+            return
+        self._prompt_recategorize(self.organize_move_by_index[index])
+
+    @work(exclusive=True)
+    async def _prompt_recategorize(self, move: OrganizeMove) -> None:
+        new_category = await self.push_screen_wait(
+            TextPromptScreen(f"New category for {move.path.name} (currently {move.category}):", initial=move.category)
+        )
+        if not new_category:
+            return
+        clf = classify.load()
+        clf.update(move.path, new_category)
+        classify.save(clf)
+        self.organize_overrides[move.path] = new_category
+        self._refresh_organize_list()
+        self.notify(f"Learned: {move.path.name} -> {new_category}")
+
     # ------------------------------------------------------------- Shared
 
     def action_select_all(self) -> None:
@@ -654,6 +772,8 @@ class FileCleanerApp(App[None]):
             self.query_one("#candidates", SelectionList).select_all()
         elif tab == "tab-rules":
             self.query_one("#rules_list", SelectionList).select_all()
+        elif tab == "tab-organize":
+            self.query_one("#organize_moves", SelectionList).select_all()
 
     def action_select_none(self) -> None:
         tab = self._active_tab()
@@ -661,7 +781,9 @@ class FileCleanerApp(App[None]):
             self.query_one("#candidates", SelectionList).deselect_all()
         elif tab == "tab-rules":
             self.query_one("#rules_list", SelectionList).deselect_all()
+        elif tab == "tab-organize":
+            self.query_one("#organize_moves", SelectionList).deselect_all()
 
 
-def run_tui() -> None:
-    FileCleanerApp().run()
+def run_tui(*, root: Path | None = None) -> None:
+    FileCleanerApp(root=root).run()

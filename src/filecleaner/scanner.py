@@ -407,26 +407,42 @@ def select_rules(
 
 
 def _scan_setup(
-    config: dict[str, Any], extra_excludes: tuple[Path, ...] = ()
+    config: dict[str, Any], extra_excludes: tuple[Path, ...] = (), *, root: Path | None = None
 ) -> tuple[Path, list[Path], bool, list[Path], tuple[Path, ...]]:
+    """Resolve the effective root for "home"-scoped rules and, when that root
+    really is the home directory, every external volume for "each_volume"
+    rules too.
+
+    ``root`` defaults to the current working directory — not the home
+    directory — so a scan run from inside some folder is scoped to that
+    folder by default. Passing the actual home directory (``root=Path.home()``,
+    which is what a bare ``fclean scan`` run *from* the home directory
+    produces) restores the traditional whole-machine scan across every
+    detected volume; any other root only ever scans that one directory tree,
+    since "each_volume" rules (external drive trash, etc.) don't make sense
+    scoped to an arbitrary folder.
+    """
     home = Path.home()
-    roots = default_scan_roots(config.get("scan_roots") or [])
-    home_in_roots = any(_same_path(r, home) for r in roots)
-    volume_roots = [r for r in roots if not _same_path(r, home)]
+    effective_root = (root if root is not None else Path.cwd()).expanduser().resolve()
     extra_protected = (
         config_mod.extra_protected_paths(config) + config_mod.data_paths_to_protect(config) + tuple(extra_excludes)
     )
-    return home, roots, home_in_roots, volume_roots, extra_protected
+    if _same_path(effective_root, home):
+        roots = default_scan_roots(config.get("scan_roots") or [])
+        root_in_roots = any(_same_path(r, effective_root) for r in roots)
+        volume_roots = [r for r in roots if not _same_path(r, effective_root)]
+        return effective_root, roots, root_in_roots, volume_roots, extra_protected
+    return effective_root, [effective_root], True, [], extra_protected
 
 
 def _iter_targets(
-    selected: list[Rule], home: Path, home_in_roots: bool, volume_roots: list[Path]
+    selected: list[Rule], root: Path, root_in_roots: bool, volume_roots: list[Path]
 ) -> Iterator[tuple[Rule, Path]]:
     """Every (rule, root) pair a scan will walk, in the order it will walk them."""
     for rule in selected:
         if rule.scope == "home":
-            if home_in_roots:
-                yield rule, home
+            if root_in_roots:
+                yield rule, root
         elif rule.scope == "each_volume":
             for vol_root in volume_roots:
                 yield rule, vol_root
@@ -490,6 +506,7 @@ def count_total_dirs(
     include_disabled: bool = False,
     extra_excludes: tuple[Path, ...] = (),
     rules: tuple[Rule, ...] | None = None,
+    root: Path | None = None,
 ) -> int:
     """Pre-pass: walk every directory a real scan would visit, without
     stat-ing matches, so ``run_scan`` can report true percent-complete.
@@ -501,8 +518,10 @@ def count_total_dirs(
     scan screen), not on every CLI invocation.
     """
     selected = select_rules(config, only_rules=only_rules, include_disabled=include_disabled, rules=rules)
-    home, _roots, home_in_roots, volume_roots, extra_protected = _scan_setup(config, extra_excludes)
-    targets = list(_iter_targets(selected, home, home_in_roots, volume_roots))
+    effective_root, _roots, root_in_roots, volume_roots, extra_protected = _scan_setup(
+        config, extra_excludes, root=root
+    )
+    targets = list(_iter_targets(selected, effective_root, root_in_roots, volume_roots))
     counter = _ScanCounter()
     max_workers = config.get("scan_concurrency", 4)
     _run_targets(targets, extra_protected, progress=None, counter=counter, count_only=True, max_workers=max_workers)
@@ -518,10 +537,14 @@ def run_scan(
     progress: ProgressCallback | None = None,
     rules: tuple[Rule, ...] | None = None,
     total_dirs: int | None = None,
+    root: Path | None = None,
 ) -> ScanResult:
     """Run every selected rule over the configured roots and return the
     coalesced, safety-filtered candidates. ``(rule, root)`` walks run
     concurrently, bounded by the ``scan_concurrency`` config key.
+
+    ``root`` defaults to the current working directory (see ``_scan_setup``);
+    pass the home directory to get the traditional whole-machine scan.
 
     ``total_dirs`` — typically from a prior ``count_total_dirs`` call — lets
     ``progress`` report a real percent-complete instead of just a message;
@@ -529,8 +552,10 @@ def run_scan(
     """
     started = time.monotonic()
     selected = select_rules(config, only_rules=only_rules, include_disabled=include_disabled, rules=rules)
-    home, roots, home_in_roots, volume_roots, extra_protected = _scan_setup(config, extra_excludes)
-    targets = list(_iter_targets(selected, home, home_in_roots, volume_roots))
+    effective_root, roots, root_in_roots, volume_roots, extra_protected = _scan_setup(
+        config, extra_excludes, root=root
+    )
+    targets = list(_iter_targets(selected, effective_root, root_in_roots, volume_roots))
 
     result = ScanResult(scan_roots=list(roots))
     counter = _ScanCounter(total=total_dirs)

@@ -29,6 +29,8 @@ from filecleaner import device as device_mod
 from filecleaner import duplicates as duplicates_mod
 from filecleaner import format as fmt
 from filecleaner import largefiles as largefiles_mod
+from filecleaner import leftovers as leftovers_mod
+from filecleaner import organize as organize_mod
 from filecleaner import output as output_mod
 from filecleaner import plan as plan_mod
 from filecleaner import profiles as profiles_mod
@@ -36,7 +38,7 @@ from filecleaner import quarantine as quarantine_mod
 from filecleaner import rules as rules_mod
 from filecleaner import schedule as schedule_mod
 from filecleaner import volumes as volumes_mod
-from filecleaner.models import ActionResult, BackupInfo, QuarantineEntry, ScanResult
+from filecleaner.models import ActionResult, BackupInfo, Candidate, QuarantineEntry, ScanResult
 
 app = typer.Typer(
     add_completion=False,
@@ -116,18 +118,27 @@ def _parse_excludes(exclude: list[str] | None) -> tuple:
     return tuple(Path(p).expanduser() for p in exclude) if exclude else ()
 
 
+def _parse_root(root: str | None) -> Path | None:
+    return Path(root).expanduser().resolve() if root else None
+
+
 def _run_scan(
     cfg: dict,
     *,
     rules: str | None,
     include_disabled: bool,
     exclude: list[str] | None,
+    root: str | None = None,
     show_progress: bool = True,
 ) -> ScanResult:
     try:
         only_rules = _parse_rules_filter(rules)
     except Exception as exc:  # defensive; splitting a string cannot really fail
         raise CliError(str(exc)) from exc
+
+    root_path = _parse_root(root)
+    if root_path is not None and not root_path.is_dir():
+        raise CliError(f"--root {root_path} is not a directory.")
 
     progress = None
     if show_progress and sys.stderr.isatty():
@@ -142,6 +153,7 @@ def _run_scan(
             include_disabled=include_disabled,
             extra_excludes=_parse_excludes(exclude),
             progress=progress,
+            root=root_path,
         )
     except scanner.UnknownRuleError as exc:
         raise CliError(str(exc)) from exc
@@ -229,8 +241,16 @@ def main(
 # --------------------------------------------------------------------------
 
 
+_ROOT_HELP = (
+    "Directory to scan, and its subfolders (default: the current directory). Pass your home "
+    "directory (e.g. `~`) to get the traditional whole-machine scan across every external volume too — "
+    "rules anchored to a specific path under home (like browser caches) only match there."
+)
+
+
 @app.command()
 def scan(
+    root: str | None = typer.Argument(None, help=_ROOT_HELP),
     rules: str | None = typer.Option(None, "--rules", help="Comma-separated rule ids to limit the scan to."),
     include_disabled: bool = typer.Option(
         False, "--include-disabled", help="Also report opt-in / disabled-by-default categories."
@@ -243,7 +263,9 @@ def scan(
 ) -> None:
     """Read-only report of cleanup candidates. Never modifies anything."""
     cfg = _load_config()
-    result = _run_scan(cfg, rules=rules, include_disabled=include_disabled, exclude=exclude, show_progress=not as_json)
+    result = _run_scan(
+        cfg, rules=rules, include_disabled=include_disabled, exclude=exclude, root=root, show_progress=not as_json
+    )
     if as_json:
         output_mod.emit(result)
     else:
@@ -253,6 +275,7 @@ def scan(
 
 @app.command()
 def clean(
+    root: str | None = typer.Argument(None, help=_ROOT_HELP),
     rules: str | None = typer.Option(None, "--rules", help="Comma-separated rule ids to limit the clean to."),
     apply: bool = typer.Option(False, "--apply", help="Actually move matches to quarantine (default: dry-run)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
@@ -269,7 +292,9 @@ def clean(
 ) -> None:
     """Move matched junk into the local quarantine (restorable). Dry-run unless --apply is passed."""
     cfg = _load_config()
-    result = _run_scan(cfg, rules=rules, include_disabled=include_disabled, exclude=exclude, show_progress=not as_json)
+    result = _run_scan(
+        cfg, rules=rules, include_disabled=include_disabled, exclude=exclude, root=root, show_progress=not as_json
+    )
     if not as_json:
         _print_scan_result(result)
 
@@ -533,9 +558,19 @@ def duplicates(
     paths: list[str] | None = typer.Argument(None, help="Directories to scan (default: home directory)."),
     top: int = typer.Option(30, "--top", help="Show the top N duplicate groups by wasted space."),
     min_size: int = typer.Option(4096, "--min-size", help="Ignore files smaller than this many bytes."),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Permanently delete every copy but one per group. Quarantines then immediately purges "
+        "(still audited, hash-verified, deny-list-checked — just no waiting period). Cannot be undone.",
+    ),
+    keep: str = typer.Option(
+        "oldest", "--keep", help="Which copy to keep per group: oldest, newest, or shortest-path."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Find duplicate files by content hash. Read-only — nothing is moved."""
+    """Find duplicate files by content hash. Read-only unless --apply is passed."""
     cfg = _load_config()
     roots = [Path(p).expanduser() for p in paths] if paths else [Path.home()]
     if not as_json:
@@ -549,23 +584,76 @@ def duplicates(
     if progress:
         err_console.print(" " * 80, end="\r")
 
-    if as_json:
-        output_mod.emit({"groups": [g.to_dict() for g in groups], "total_wasted_bytes": sum(g.wasted_bytes for g in groups)})
-        return
-    if not groups:
-        console.print("No duplicates found.")
+    if not apply:
+        if as_json:
+            output_mod.emit(
+                {"groups": [g.to_dict() for g in groups], "total_wasted_bytes": sum(g.wasted_bytes for g in groups)}
+            )
+            return
+        if not groups:
+            console.print("No duplicates found.")
+            return
+        table = Table(title=f"Top {len(groups)} duplicate groups by wasted space")
+        table.add_column("Wasted", justify="right")
+        table.add_column("Size each", justify="right")
+        table.add_column("Copies", justify="right")
+        table.add_column("Paths", overflow="fold")
+        for g in groups:
+            table.add_row(fmt.human_size(g.wasted_bytes), fmt.human_size(g.size_bytes), str(len(g.paths)), "\n".join(esc(str(p)) for p in g.paths))
+        console.print(table)
+        console.print(f"[bold]Total wasted space: {fmt.human_size(sum(g.wasted_bytes for g in groups))}[/bold]")
+        console.print("[dim]Nothing was moved. Re-run with --apply to permanently delete extra copies.[/dim]")
         return
 
-    table = Table(title=f"Top {len(groups)} duplicate groups by wasted space")
-    table.add_column("Wasted", justify="right")
-    table.add_column("Size each", justify="right")
-    table.add_column("Copies", justify="right")
-    table.add_column("Paths", overflow="fold")
-    for g in groups:
-        table.add_row(fmt.human_size(g.wasted_bytes), fmt.human_size(g.size_bytes), str(len(g.paths)), "\n".join(esc(str(p)) for p in g.paths))
-    console.print(table)
-    console.print(f"[bold]Total wasted space: {fmt.human_size(sum(g.wasted_bytes for g in groups))}[/bold]")
-    console.print("[dim]Nothing was moved. Use the TUI (`fclean tui`) or `config keep` / manual `mv` to act on it.[/dim]")
+    if not groups:
+        if as_json:
+            output_mod.emit({"deleted": 0, "total_size_bytes": 0, "skipped": []})
+        else:
+            console.print("No duplicates found.")
+        return
+
+    try:
+        to_delete = duplicates_mod.select_deletions(groups, keep=keep)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+
+    candidates: list[Candidate] = []
+    for p in to_delete:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        candidates.append(
+            Candidate(path=p, size_bytes=st.st_size, is_dir=False, mtime=st.st_mtime, rule_id="duplicate", category="Duplicates", risk="medium")
+        )
+    total_bytes = sum(c.size_bytes for c in candidates)
+
+    if not _confirm(
+        f"\nPermanently delete {len(candidates)} duplicate file(s) ({fmt.human_size(total_bytes)}), "
+        f"keeping one copy per group ({keep})? This cannot be undone.",
+        yes=yes,
+    ):
+        console.print("Cancelled.")
+        raise typer.Exit()
+
+    action = quarantine_mod.quarantine_candidates(candidates, cfg, allowed_roots=tuple(roots))
+    purge_result = quarantine_mod.purge_entries([e.id for e in action.entries], cfg)
+    all_skipped = action.skipped + purge_result.skipped
+
+    if as_json:
+        output_mod.emit(
+            {
+                "deleted": len(purge_result.entries),
+                "total_size_bytes": sum(e.size_bytes for e in action.entries),
+                "skipped": [s.to_dict() for s in all_skipped],
+            }
+        )
+        return
+    console.print(f"[green]Permanently deleted {len(purge_result.entries)} duplicate file(s) ({fmt.human_size(total_bytes)}).[/green]")
+    if all_skipped:
+        console.print(f"[yellow]{len(all_skipped)} item(s) skipped:[/yellow]")
+        for s in all_skipped[:10]:
+            console.print(f"  [dim]{esc(s.path)}: {esc(s.reason)}[/dim]")
 
 
 @app.command(name="large-files")
@@ -593,6 +681,192 @@ def large_files(
     for f in results:
         table.add_row(fmt.human_size(f.size_bytes), fmt.human_age(f.mtime), esc(str(f.path)))
     console.print(table)
+
+
+# --------------------------------------------------------------------------
+# organize
+# --------------------------------------------------------------------------
+
+
+@app.command()
+def organize(
+    root: str = typer.Argument(".", help="Directory to organize (default: current directory)."),
+    apply: bool = typer.Option(False, "--apply", help="Actually move files (default: dry-run)."),
+    mode: str = typer.Option("type", "--by", help="Sort by 'type', 'date' (type then date), or 'date-only'."),
+    cluster: bool = typer.Option(
+        True, "--cluster/--no-cluster", help="Group related/versioned files into a Projects folder."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Propose (and, with --apply, perform) sorting loose files in a folder into
+    type/date/project subfolders. Only top-level files are considered — existing
+    subfolders are never touched. Dry-run unless --apply is passed."""
+    cfg = _load_config()
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.is_dir():
+        raise CliError(f"{root_path} is not a directory.")
+    try:
+        moves = organize_mod.propose_moves(root_path, cfg, mode=mode, cluster_projects=cluster)
+    except organize_mod.OrganizeError as exc:
+        raise CliError(str(exc)) from exc
+
+    if not moves:
+        if as_json:
+            output_mod.emit({"moves": [], "applied": False})
+        else:
+            console.print("Nothing to organize — no loose files found (existing subfolders are never touched).")
+        return
+
+    if not apply:
+        if as_json:
+            output_mod.emit({"moves": [m.to_dict() for m in moves], "applied": False})
+            return
+        table = Table(title=f"Organize plan for {root_path}")
+        table.add_column("File")
+        table.add_column("-> Destination")
+        table.add_column("Reason")
+        for m in sorted(moves, key=lambda m: str(m.path)):
+            table.add_row(esc(m.path.name), esc(str(m.destination.relative_to(root_path))), esc(m.reason))
+        console.print(table)
+        console.print(f"\n[dim]Dry run only — {len(moves)} file(s) would move. Re-run with --apply to do it.[/dim]")
+        return
+
+    if not _confirm(f"\nMove {len(moves)} file(s) into subfolders under {root_path}?", yes=yes):
+        console.print("Cancelled.")
+        raise typer.Exit()
+
+    result = organize_mod.apply_moves(moves, cfg)
+    if as_json:
+        output_mod.emit(result)
+    else:
+        console.print(f"[green]Moved {len(result.entries)} item(s).[/green]")
+        if result.skipped:
+            console.print(f"[yellow]{len(result.skipped)} item(s) skipped:[/yellow]")
+            for s in result.skipped[:10]:
+                console.print(f"  [dim]{esc(s.path)}: {esc(s.reason)}[/dim]")
+        if result.entries:
+            console.print(f"Undo any time with: [bold]fclean organize-undo {result.session_id}[/bold]")
+
+
+@app.command(name="organize-sessions")
+def organize_sessions(as_json: bool = typer.Option(False, "--json")) -> None:
+    """List organize sessions (one per `organize --apply` run), for `organize-undo`."""
+    cfg = _load_config()
+    sessions = organize_mod.list_sessions(cfg)
+    if as_json:
+        output_mod.emit({"sessions": sessions})
+        return
+    if not sessions:
+        console.print("No organize sessions yet.")
+        return
+    table = Table(title="Organize sessions")
+    table.add_column("Session")
+    table.add_column("Items", justify="right")
+    table.add_column("Still moved", justify="right")
+    table.add_column("First moved")
+    for s in sessions:
+        table.add_row(s["session_id"], str(s["count"]), str(s["active"]), fmt.short_timestamp(s["first_timestamp"]))
+    console.print(table)
+
+
+@app.command(name="organize-undo")
+def organize_undo(
+    session: str = typer.Argument(..., help="The organize session id to undo (shown after `organize --apply`)."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Move everything from one `organize --apply` run back to where it came from."""
+    cfg = _load_config()
+    try:
+        result = organize_mod.undo_session(session, cfg)
+    except organize_mod.OrganizeError as exc:
+        raise CliError(str(exc)) from exc
+    if as_json:
+        output_mod.emit(result)
+        return
+    console.print(f"[green]Restored {len(result.entries)} item(s).[/green]")
+    if result.skipped:
+        console.print(f"[yellow]{len(result.skipped)} item(s) skipped:[/yellow]")
+        for s in result.skipped[:10]:
+            console.print(f"  [dim]{esc(s.path)}: {esc(s.reason)}[/dim]")
+
+
+# --------------------------------------------------------------------------
+# leftovers
+# --------------------------------------------------------------------------
+
+
+@app.command()
+def leftovers(
+    kind: str = typer.Option("all", "--kind", help="Which detector to run: 'apps', 'installers', or 'all'."),
+    apply: bool = typer.Option(
+        False, "--apply", help="Quarantine the findings (normal safety net — restorable, not immediately purged)."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Find orphaned app-support folders (owning app no longer installed) and installer
+    archives (.dmg/.pkg/.zip) whose product is already installed or extracted. Opt-in,
+    heuristic — always review the list before applying."""
+    if kind not in ("apps", "installers", "all"):
+        raise CliError(f"--kind must be 'apps', 'installers', or 'all', got {kind!r}")
+    cfg = _load_config()
+    candidates: list[Candidate] = []
+    if kind in ("apps", "all"):
+        candidates += leftovers_mod.find_app_leftovers(cfg)
+    if kind in ("installers", "all"):
+        candidates += leftovers_mod.find_installer_cleanup(cfg)
+    total = sum(c.size_bytes for c in candidates)
+
+    if not apply:
+        if as_json:
+            output_mod.emit({"candidates": [c.to_dict() for c in candidates], "total_size_bytes": total})
+            return
+        if not candidates:
+            console.print("Nothing found.")
+            return
+        table = Table(title="Leftover installation files (opt-in, review before applying)")
+        table.add_column("Category")
+        table.add_column("Risk")
+        table.add_column("Size", justify="right")
+        table.add_column("Path", overflow="fold")
+        for c in sorted(candidates, key=lambda c: c.size_bytes, reverse=True):
+            risk_style = RISK_STYLE.get(c.risk, "")
+            table.add_row(
+                esc(c.category),
+                f"[{risk_style}]{esc(c.risk)}[/{risk_style}]" if risk_style else esc(c.risk),
+                fmt.human_size(c.size_bytes),
+                esc(str(c.path)),
+            )
+        console.print(table)
+        console.print(f"[bold]Total: {fmt.human_size(total)}[/bold]")
+        console.print(
+            "[dim]Nothing was moved — these are heuristic guesses. Review carefully, then re-run with --apply.[/dim]"
+        )
+        return
+
+    if not candidates:
+        if as_json:
+            output_mod.emit(ActionResult(action="quarantine"))
+        else:
+            console.print("Nothing found.")
+        return
+
+    if not _confirm(
+        f"\nQuarantine {len(candidates)} item(s) ({fmt.human_size(total)})? These are heuristic detections — "
+        f"double-check the list above. Restorable for {cfg['retention_days']} days.",
+        yes=yes,
+    ):
+        console.print("Cancelled.")
+        raise typer.Exit()
+
+    action = quarantine_mod.quarantine_candidates(candidates, cfg)
+    if as_json:
+        output_mod.emit(action)
+    else:
+        _print_action_result(action, "Quarantined")
+        if action.entries:
+            console.print(f"Restore any time with: [bold]fclean restore --session {action.session_id}[/bold]")
 
 
 # --------------------------------------------------------------------------
@@ -889,11 +1163,14 @@ def audit(
 
 
 @app.command()
-def tui() -> None:
+def tui(root: str | None = typer.Argument(None, help=_ROOT_HELP)) -> None:
     """Launch the interactive terminal browser."""
     from filecleaner.tui import run_tui
 
-    run_tui()
+    root_path = _parse_root(root)
+    if root_path is not None and not root_path.is_dir():
+        raise CliError(f"--root {root_path} is not a directory.")
+    run_tui(root=root_path)
 
 
 # --------------------------------------------------------------------------

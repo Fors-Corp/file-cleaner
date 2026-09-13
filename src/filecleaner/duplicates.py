@@ -121,3 +121,34 @@ def find_duplicates(
     if max_groups:
         groups = groups[:max_groups]
     return groups
+
+
+KEEP_STRATEGIES = ("oldest", "newest", "shortest-path")
+
+
+def select_deletions(groups: list[DuplicateGroup], *, keep: str = "oldest") -> list[Path]:
+    """For each group, choose one path to keep and return every *other*
+    path (across all groups) as the set to delete. Still read-only itself —
+    only ``Path.stat()`` to compare modification times; the actual delete
+    is the caller's job (see ``fclean duplicates --apply``, which quarantines
+    then immediately purges these — full deletion, but still audited and
+    deny-list-checked, never a raw ``unlink``)."""
+    if keep not in KEEP_STRATEGIES:
+        raise ValueError(f"unknown keep strategy: {keep!r}; expected one of {KEEP_STRATEGIES}")
+
+    def _mtime(path: Path, *, default: float) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return default
+
+    to_delete: list[Path] = []
+    for group in groups:
+        if keep == "shortest-path":
+            keeper = min(group.paths, key=lambda p: len(str(p)))
+        elif keep == "newest":
+            keeper = max(group.paths, key=lambda p: _mtime(p, default=float("-inf")))
+        else:  # oldest
+            keeper = min(group.paths, key=lambda p: _mtime(p, default=float("inf")))
+        to_delete.extend(p for p in group.paths if p != keeper)
+    return to_delete

@@ -337,3 +337,59 @@ class ActionResult:
             "entries": [e.to_dict() for e in self.entries],
             "skipped": [s.to_dict() for s in self.skipped],
         }
+
+
+@dataclass
+class OrganizeMove:
+    """A proposed reorganize move (see ``organize.propose_moves``) — not
+    yet applied. ``reason`` explains how the category was chosen:
+    ``"extension"`` (a confident prior), ``"classifier"`` (the learned
+    model, see ``classify.py``), ``"cluster: <name>"`` (project grouping),
+    or ``"date"``."""
+
+    path: Path
+    category: str
+    destination: Path
+    confidence: float
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "category": self.category,
+            "destination": str(self.destination),
+            "confidence": round(self.confidence, 3),
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class OrganizeEntry:
+    """One applied reorganize move, recorded so ``organize undo`` can
+    reverse it later."""
+
+    id: int
+    session_id: str
+    original_path: str
+    new_path: str
+    category: str
+    timestamp: str
+    undone: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class OrganizeResult:
+    entries: list[OrganizeEntry] = field(default_factory=list)
+    skipped: list[Skipped] = field(default_factory=list)
+    session_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "count": len(self.entries),
+            "entries": [e.to_dict() for e in self.entries],
+            "skipped": [s.to_dict() for s in self.skipped],
+        }

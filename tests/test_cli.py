@@ -68,6 +68,43 @@ def test_scan_unknown_rule_exits_nonzero(sandbox_home):
     assert "unknown rule" in str(result.exception).lower()
 
 
+def test_scan_root_argument_scopes_to_that_directory(tmp_path, sandbox_home, sandbox_config, monkeypatch):
+    from filecleaner import config as config_mod
+
+    scoped = tmp_path / "scoped"
+    scoped.mkdir()
+    (scoped / "old.log").write_bytes(b"x" * 10)
+    cfg = config_mod.load_config()
+    cfg["rules"] = [{"id": "logfiles", "include": ["*.log"], "min_age_days": 0}]
+    config_mod.save_config(cfg)
+
+    result = _invoke("scan", str(scoped), "--rules", "logfiles", "--include-disabled", "--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["scan_roots"] == [str(scoped.resolve())]
+    assert payload["candidate_count"] == 1
+
+
+def test_scan_root_argument_rejects_non_directory(tmp_path, sandbox_home):
+    not_a_dir = tmp_path / "not_a_dir.txt"
+    not_a_dir.write_text("x")
+    result = _invoke("scan", str(not_a_dir))
+    assert result.exit_code != 0
+    assert isinstance(result.exception, cli_mod.CliError)
+
+
+def test_scan_defaults_to_cwd(tmp_path, sandbox_home, monkeypatch):
+    """Running `fclean scan` from an arbitrary folder (not home) scans only
+    that folder — the new default, replacing the old "always scan home"."""
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    result = _invoke("scan", "--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["scan_roots"] == [str(other.resolve())]
+
+
 def test_clean_dry_run_does_not_move_anything(cache_item, sandbox_home):
     result = _invoke("clean")
     assert result.exit_code == 0
@@ -341,6 +378,114 @@ def test_duplicates_json(sandbox_home):
     payload = json.loads(result.stdout)
     assert len(payload["groups"]) == 1
     assert payload["groups"][0]["copies"] == 2
+
+
+def test_duplicates_apply_permanently_deletes_extra_copies(sandbox_home):
+    content = b"same content" * 100
+    a = sandbox_home / "a.bin"
+    b = sandbox_home / "b.bin"
+    a.write_bytes(content)
+    b.write_bytes(content)
+
+    result = _invoke("duplicates", str(sandbox_home), "--min-size", "10", "--apply", "--yes", "--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["deleted"] == 1
+
+    from filecleaner import quarantine as quarantine_mod
+
+    cfg = json.loads(_invoke("config", "show", "--json").stdout)["config"]
+    # Quarantine-then-immediate-purge: nothing left sitting in quarantine.
+    assert quarantine_mod.overall_summary(cfg) == (0, 0)
+    # Exactly one of the two identical files survives.
+    assert a.exists() != b.exists()
+
+
+def test_duplicates_dry_run_leaves_files_alone(sandbox_home):
+    content = b"same content" * 100
+    a = sandbox_home / "a.bin"
+    b = sandbox_home / "b.bin"
+    a.write_bytes(content)
+    b.write_bytes(content)
+
+    result = _invoke("duplicates", str(sandbox_home), "--min-size", "10", "--json")
+    assert result.exit_code == 0
+    assert a.exists() and b.exists()
+
+
+def test_leftovers_dry_run_and_apply_uses_normal_quarantine(sandbox_home, tmp_path, age_path, monkeypatch):
+    from filecleaner import leftovers as leftovers_mod
+    from filecleaner import quarantine as quarantine_mod
+
+    monkeypatch.setattr(leftovers_mod, "_APPLICATIONS_DIRS", (tmp_path / "no-apps",))
+    orphan = sandbox_home / "Library" / "Application Support" / "com.example.gone"
+    orphan.mkdir(parents=True)
+    age_path(orphan, days=60)
+
+    dry = _invoke("leftovers", "--kind", "apps", "--json")
+    assert dry.exit_code == 0
+    payload = json.loads(dry.stdout)
+    assert payload["candidates"][0]["path"] == str(orphan)
+    assert orphan.exists()  # dry-run: untouched
+
+    applied = _invoke("leftovers", "--kind", "apps", "--apply", "--yes")
+    assert applied.exit_code == 0
+    assert not orphan.exists()
+
+    cfg = json.loads(_invoke("config", "show", "--json").stdout)["config"]
+    # Normal quarantine flow (unlike duplicates --apply): still sitting in
+    # quarantine, restorable — not immediately purged.
+    count, _size = quarantine_mod.overall_summary(cfg)
+    assert count == 1
+
+
+def test_organize_dry_run_json(sandbox_home, tmp_path):
+    (tmp_path / "invoice.pdf").write_bytes(b"x")
+    result = _invoke("organize", str(tmp_path), "--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["applied"] is False
+    assert payload["moves"][0]["category"] == "Documents"
+    assert (tmp_path / "invoice.pdf").exists()  # dry-run: untouched
+
+
+def test_organize_apply_and_undo(sandbox_home, tmp_path):
+    (tmp_path / "invoice.pdf").write_bytes(b"x")
+    result = _invoke("organize", str(tmp_path), "--apply", "--yes")
+    assert result.exit_code == 0
+    assert not (tmp_path / "invoice.pdf").exists()
+    assert (tmp_path / "Documents" / "invoice.pdf").exists()
+
+    session_id = result.stdout.split("organize-undo ")[1].strip().rstrip(".")
+    undo_result = _invoke("organize-undo", session_id)
+    assert undo_result.exit_code == 0
+    assert (tmp_path / "invoice.pdf").exists()
+
+
+def test_organize_rejects_non_directory(sandbox_home, tmp_path):
+    not_a_dir = tmp_path / "file.txt"
+    not_a_dir.write_text("x")
+    result = _invoke("organize", str(not_a_dir))
+    assert result.exit_code != 0
+    assert isinstance(result.exception, cli_mod.CliError)
+
+
+def test_organize_sessions_lists_applied_runs(sandbox_home, tmp_path):
+    (tmp_path / "invoice.pdf").write_bytes(b"x")
+    _invoke("organize", str(tmp_path), "--apply", "--yes")
+
+    result = _invoke("organize-sessions", "--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload["sessions"]) == 1
+    assert payload["sessions"][0]["count"] == 1
+    assert payload["sessions"][0]["active"] == 1
+
+
+def test_organize_undo_unknown_session_errors(sandbox_home):
+    result = _invoke("organize-undo", "does-not-exist")
+    assert result.exit_code != 0
+    assert isinstance(result.exception, cli_mod.CliError)
 
 
 def test_audit_log_records_scan(cache_item, sandbox_home):
