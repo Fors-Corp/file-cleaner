@@ -1,0 +1,2308 @@
+{
+ "description": "Language-neutral conformance table for safety.is_protected. Each case is a path and the expected verdict. A harness must (1) create setup.dirs, then setup.symlinks, (2) expand placeholders, (3) point the implementation's home at {HOME}, its volumes directory at {VOLUMES}, and the working directory at {HOME}, then (4) assert every case. Cases with 'requires' may be skipped when the filesystem lacks that property.",
+ "placeholders": {
+  "{TMP}": "fresh, fully resolved temporary directory",
+  "{HOME}": "{TMP}/h\u00f4me-\u00e9 (non-ASCII on purpose; created with this exact NFC spelling)",
+  "{HOME_NFD}": "{HOME} with its final component NFD-normalised",
+  "{HOME_SWAPCASE}": "{HOME} with the case of its final component swapped",
+  "{VOLUMES}": "{TMP}/Volumes (stands in for /Volumes)",
+  "{SELF}": "directory containing the implementation's own code",
+  "{SELF_SWAPCASE}": "{SELF} with the case of its final component swapped"
+ },
+ "setup": {
+  "dirs": [
+   "{VOLUMES}/Ext",
+   "{VOLUMES}/Ext/System",
+   "{VOLUMES}/Ext/usr",
+   "{VOLUMES}/Ext/bin",
+   "{VOLUMES}/Ext/sbin",
+   "{VOLUMES}/Ext/private/var/db",
+   "{VOLUMES}/Ext/Library/Apple",
+   "{VOLUMES}/Ext/Library/CoreServices",
+   "{TMP}/fakeroot/System",
+   "{VOLUMES}/Donn\u00e9es",
+   "{HOME}/.ssh",
+   "{HOME}/.gnupg",
+   "{HOME}/Library/Keychains",
+   "{HOME}/Library/Mail",
+   "{HOME}/Library/Messages",
+   "{HOME}/Library/Photos",
+   "{HOME}/Library/Mobile Documents",
+   "{HOME}/Library/Accounts",
+   "{HOME}/Library/Passes",
+   "{HOME}/Library/Wallet",
+   "{HOME}/Documents",
+   "{HOME}/Library/Caches",
+   "{TMP}/keep",
+   "{TMP}/caf\u00e9",
+   "{TMP}/ordinary/System"
+  ],
+  "symlinks": [
+   {
+    "link": "{TMP}/links/abs_0",
+    "target": "/System"
+   },
+   {
+    "link": "{TMP}/links/abs_1",
+    "target": "/usr"
+   },
+   {
+    "link": "{TMP}/links/abs_2",
+    "target": "/bin"
+   },
+   {
+    "link": "{TMP}/links/abs_3",
+    "target": "/sbin"
+   },
+   {
+    "link": "{TMP}/links/abs_4",
+    "target": "/etc"
+   },
+   {
+    "link": "{TMP}/links/abs_5",
+    "target": "/dev"
+   },
+   {
+    "link": "{TMP}/links/abs_6",
+    "target": "/private/etc"
+   },
+   {
+    "link": "{TMP}/links/abs_7",
+    "target": "/private/var/db"
+   },
+   {
+    "link": "{TMP}/links/abs_8",
+    "target": "/private/var/root"
+   },
+   {
+    "link": "{TMP}/links/abs_9",
+    "target": "/private/var/audit"
+   },
+   {
+    "link": "{TMP}/links/abs_10",
+    "target": "/private/var/vm"
+   },
+   {
+    "link": "{TMP}/links/abs_11",
+    "target": "/Applications"
+   },
+   {
+    "link": "{TMP}/links/abs_12",
+    "target": "/Library/Apple"
+   },
+   {
+    "link": "{TMP}/links/abs_13",
+    "target": "/Library/CoreServices"
+   },
+   {
+    "link": "{TMP}/links/abs_14",
+    "target": "/Library/Extensions"
+   },
+   {
+    "link": "{TMP}/links/abs_15",
+    "target": "/Library/Frameworks"
+   },
+   {
+    "link": "{TMP}/links/abs_16",
+    "target": "/Library/Keychains"
+   },
+   {
+    "link": "{TMP}/links/abs_17",
+    "target": "/Library/StagedExtensions"
+   },
+   {
+    "link": "{TMP}/links/abs_18",
+    "target": "/Library/SystemMigration"
+   },
+   {
+    "link": "{TMP}/links/vol_0",
+    "target": "{VOLUMES}/Ext/System"
+   },
+   {
+    "link": "{TMP}/links/vol_1",
+    "target": "{VOLUMES}/Ext/usr"
+   },
+   {
+    "link": "{TMP}/links/vol_2",
+    "target": "{VOLUMES}/Ext/bin"
+   },
+   {
+    "link": "{TMP}/links/vol_3",
+    "target": "{VOLUMES}/Ext/sbin"
+   },
+   {
+    "link": "{TMP}/links/vol_4",
+    "target": "{VOLUMES}/Ext/private/var/db"
+   },
+   {
+    "link": "{TMP}/links/vol_5",
+    "target": "{VOLUMES}/Ext/Library/Apple"
+   },
+   {
+    "link": "{TMP}/links/vol_6",
+    "target": "{VOLUMES}/Ext/Library/CoreServices"
+   },
+   {
+    "link": "{VOLUMES}/BootAlias",
+    "target": "{TMP}/fakeroot"
+   },
+   {
+    "link": "{TMP}/links/home_0",
+    "target": "{HOME}/.ssh"
+   },
+   {
+    "link": "{TMP}/links/home_1",
+    "target": "{HOME}/.gnupg"
+   },
+   {
+    "link": "{TMP}/links/home_2",
+    "target": "{HOME}/Library/Keychains"
+   },
+   {
+    "link": "{TMP}/links/home_3",
+    "target": "{HOME}/Library/Mail"
+   },
+   {
+    "link": "{TMP}/links/home_4",
+    "target": "{HOME}/Library/Messages"
+   },
+   {
+    "link": "{TMP}/links/home_5",
+    "target": "{HOME}/Library/Photos"
+   },
+   {
+    "link": "{TMP}/links/home_6",
+    "target": "{HOME}/Library/Mobile Documents"
+   },
+   {
+    "link": "{TMP}/links/home_7",
+    "target": "{HOME}/Library/Accounts"
+   },
+   {
+    "link": "{TMP}/links/home_8",
+    "target": "{HOME}/Library/Passes"
+   },
+   {
+    "link": "{TMP}/links/home_9",
+    "target": "{HOME}/Library/Wallet"
+   },
+   {
+    "link": "{TMP}/links/dangling",
+    "target": "{TMP}/gone"
+   },
+   {
+    "link": "{TMP}/links/dangling_system",
+    "target": "/System/gone/nowhere"
+   },
+   {
+    "link": "{TMP}/links/dangling_ssh",
+    "target": "{HOME}/.ssh/missing_key"
+   },
+   {
+    "link": "{TMP}/links/dangling_ssh_case",
+    "target": "{HOME_SWAPCASE}/.SSH/missing_key"
+   },
+   {
+    "link": "{HOME}/.ssh/loop_a",
+    "target": "{HOME}/.ssh/loop_b"
+   },
+   {
+    "link": "{HOME}/.ssh/loop_b",
+    "target": "{HOME}/.ssh/loop_a"
+   },
+   {
+    "link": "{TMP}/links/chain_1",
+    "target": "{TMP}/links/chain_2"
+   },
+   {
+    "link": "{TMP}/links/chain_2",
+    "target": "{TMP}/links/home_3"
+   },
+   {
+    "link": "{TMP}/links/to_keep",
+    "target": "{TMP}/keep"
+   }
+  ]
+ },
+ "cases": [
+  {
+   "group": "absolute/exact",
+   "path": "/System",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/System/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/system/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/SYSTEM/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/sYSTEM/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Systemx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_0/child",
+   "protected": true,
+   "note": "symlink -> /System"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/usr",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/usr/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/usr/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/USR/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/USR/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/usrx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_1/child",
+   "protected": true,
+   "note": "symlink -> /usr"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/bin",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/bin/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/bin/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/BIN/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/BIN/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/binx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_2/child",
+   "protected": true,
+   "note": "symlink -> /bin"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/sbin",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/sbin/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/sbin/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/SBIN/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/SBIN/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/sbinx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_3/child",
+   "protected": true,
+   "note": "symlink -> /sbin"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/etc",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/etc/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/etc/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/ETC/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/ETC/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/etcx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_4/child",
+   "protected": true,
+   "note": "symlink -> /etc"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/dev",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/dev/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/dev/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/DEV/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/DEV/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/devx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_5/child",
+   "protected": true,
+   "note": "symlink -> /dev"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/private/etc",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/private/etc/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/private/etc/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/ETC/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/ETC/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/private/etcx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_6/child",
+   "protected": true,
+   "note": "symlink -> /private/etc"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/private/var/db",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/private/var/db/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/private/var/db/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/DB/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/DB/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/private/var/dbx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_7/child",
+   "protected": true,
+   "note": "symlink -> /private/var/db"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/private/var/root",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/private/var/root/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/private/var/root/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/ROOT/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/ROOT/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/private/var/rootx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_8/child",
+   "protected": true,
+   "note": "symlink -> /private/var/root"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/private/var/audit",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/private/var/audit/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/private/var/audit/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/AUDIT/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/AUDIT/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/private/var/auditx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_9/child",
+   "protected": true,
+   "note": "symlink -> /private/var/audit"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/private/var/vm",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/private/var/vm/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/private/var/vm/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/VM/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/PRIVATE/VAR/VM/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/private/var/vmx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_10/child",
+   "protected": true,
+   "note": "symlink -> /private/var/vm"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Applications",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Applications/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/applications/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/APPLICATIONS/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/aPPLICATIONS/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Applicationsx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_11/child",
+   "protected": true,
+   "note": "symlink -> /Applications"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Library/Apple",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Library/Apple/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/library/apple/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/LIBRARY/APPLE/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/lIBRARY/aPPLE/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Library/Applex/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_12/child",
+   "protected": true,
+   "note": "symlink -> /Library/Apple"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Library/CoreServices",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Library/CoreServices/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/library/coreservices/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/LIBRARY/CORESERVICES/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/lIBRARY/cOREsERVICES/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Library/CoreServicesx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_13/child",
+   "protected": true,
+   "note": "symlink -> /Library/CoreServices"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Library/Extensions",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Library/Extensions/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/library/extensions/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/LIBRARY/EXTENSIONS/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/lIBRARY/eXTENSIONS/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Library/Extensionsx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_14/child",
+   "protected": true,
+   "note": "symlink -> /Library/Extensions"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Library/Frameworks",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Library/Frameworks/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/library/frameworks/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/LIBRARY/FRAMEWORKS/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/lIBRARY/fRAMEWORKS/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Library/Frameworksx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_15/child",
+   "protected": true,
+   "note": "symlink -> /Library/Frameworks"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Library/Keychains",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Library/Keychains/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/library/keychains/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/LIBRARY/KEYCHAINS/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/lIBRARY/kEYCHAINS/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Library/Keychainsx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_16/child",
+   "protected": true,
+   "note": "symlink -> /Library/Keychains"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Library/StagedExtensions",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Library/StagedExtensions/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/library/stagedextensions/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/LIBRARY/STAGEDEXTENSIONS/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/lIBRARY/sTAGEDeXTENSIONS/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Library/StagedExtensionsx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_17/child",
+   "protected": true,
+   "note": "symlink -> /Library/StagedExtensions"
+  },
+  {
+   "group": "absolute/exact",
+   "path": "/Library/SystemMigration",
+   "protected": true
+  },
+  {
+   "group": "absolute/child",
+   "path": "/Library/SystemMigration/some/child",
+   "protected": true
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/library/systemmigration/child",
+   "protected": true,
+   "note": "all-lowercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/LIBRARY/SYSTEMMIGRATION/child",
+   "protected": true,
+   "note": "all-uppercase spelling"
+  },
+  {
+   "group": "absolute/case-variant",
+   "path": "/lIBRARY/sYSTEMmIGRATION/child",
+   "protected": true,
+   "note": "swapped-case spelling"
+  },
+  {
+   "group": "absolute/boundary",
+   "path": "/Library/SystemMigrationx/child",
+   "protected": false,
+   "note": "shares a string prefix but is a sibling"
+  },
+  {
+   "group": "absolute/symlink-into",
+   "path": "{TMP}/links/abs_18/child",
+   "protected": true,
+   "note": "symlink -> /Library/SystemMigration"
+  },
+  {
+   "group": "volume/exact",
+   "path": "{VOLUMES}/Ext/System",
+   "protected": true
+  },
+  {
+   "group": "volume/child",
+   "path": "{VOLUMES}/Ext/System/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/system/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/SYSTEM/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/ext/sYSTEM/child",
+   "protected": true,
+   "note": "volume name case-varied too"
+  },
+  {
+   "group": "volume/boundary",
+   "path": "{VOLUMES}/Ext/Systemx/child",
+   "protected": false
+  },
+  {
+   "group": "volume/symlink-into",
+   "path": "{TMP}/links/vol_0/child",
+   "protected": true,
+   "note": "symlink -> Ext/System"
+  },
+  {
+   "group": "volume/exact",
+   "path": "{VOLUMES}/Ext/usr",
+   "protected": true
+  },
+  {
+   "group": "volume/child",
+   "path": "{VOLUMES}/Ext/usr/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/usr/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/USR/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/ext/USR/child",
+   "protected": true,
+   "note": "volume name case-varied too"
+  },
+  {
+   "group": "volume/boundary",
+   "path": "{VOLUMES}/Ext/usrx/child",
+   "protected": false
+  },
+  {
+   "group": "volume/symlink-into",
+   "path": "{TMP}/links/vol_1/child",
+   "protected": true,
+   "note": "symlink -> Ext/usr"
+  },
+  {
+   "group": "volume/exact",
+   "path": "{VOLUMES}/Ext/bin",
+   "protected": true
+  },
+  {
+   "group": "volume/child",
+   "path": "{VOLUMES}/Ext/bin/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/bin/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/BIN/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/ext/BIN/child",
+   "protected": true,
+   "note": "volume name case-varied too"
+  },
+  {
+   "group": "volume/boundary",
+   "path": "{VOLUMES}/Ext/binx/child",
+   "protected": false
+  },
+  {
+   "group": "volume/symlink-into",
+   "path": "{TMP}/links/vol_2/child",
+   "protected": true,
+   "note": "symlink -> Ext/bin"
+  },
+  {
+   "group": "volume/exact",
+   "path": "{VOLUMES}/Ext/sbin",
+   "protected": true
+  },
+  {
+   "group": "volume/child",
+   "path": "{VOLUMES}/Ext/sbin/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/sbin/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/SBIN/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/ext/SBIN/child",
+   "protected": true,
+   "note": "volume name case-varied too"
+  },
+  {
+   "group": "volume/boundary",
+   "path": "{VOLUMES}/Ext/sbinx/child",
+   "protected": false
+  },
+  {
+   "group": "volume/symlink-into",
+   "path": "{TMP}/links/vol_3/child",
+   "protected": true,
+   "note": "symlink -> Ext/sbin"
+  },
+  {
+   "group": "volume/exact",
+   "path": "{VOLUMES}/Ext/private/var/db",
+   "protected": true
+  },
+  {
+   "group": "volume/child",
+   "path": "{VOLUMES}/Ext/private/var/db/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/private/var/db/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/PRIVATE/VAR/DB/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/ext/PRIVATE/VAR/DB/child",
+   "protected": true,
+   "note": "volume name case-varied too"
+  },
+  {
+   "group": "volume/boundary",
+   "path": "{VOLUMES}/Ext/private/var/dbx/child",
+   "protected": false
+  },
+  {
+   "group": "volume/symlink-into",
+   "path": "{TMP}/links/vol_4/child",
+   "protected": true,
+   "note": "symlink -> Ext/private/var/db"
+  },
+  {
+   "group": "volume/exact",
+   "path": "{VOLUMES}/Ext/Library/Apple",
+   "protected": true
+  },
+  {
+   "group": "volume/child",
+   "path": "{VOLUMES}/Ext/Library/Apple/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/library/apple/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/LIBRARY/APPLE/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/ext/lIBRARY/aPPLE/child",
+   "protected": true,
+   "note": "volume name case-varied too"
+  },
+  {
+   "group": "volume/boundary",
+   "path": "{VOLUMES}/Ext/Library/Applex/child",
+   "protected": false
+  },
+  {
+   "group": "volume/symlink-into",
+   "path": "{TMP}/links/vol_5/child",
+   "protected": true,
+   "note": "symlink -> Ext/Library/Apple"
+  },
+  {
+   "group": "volume/exact",
+   "path": "{VOLUMES}/Ext/Library/CoreServices",
+   "protected": true
+  },
+  {
+   "group": "volume/child",
+   "path": "{VOLUMES}/Ext/Library/CoreServices/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/library/coreservices/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/Ext/LIBRARY/CORESERVICES/child",
+   "protected": true
+  },
+  {
+   "group": "volume/case-variant",
+   "path": "{VOLUMES}/ext/lIBRARY/cOREsERVICES/child",
+   "protected": true,
+   "note": "volume name case-varied too"
+  },
+  {
+   "group": "volume/boundary",
+   "path": "{VOLUMES}/Ext/Library/CoreServicesx/child",
+   "protected": false
+  },
+  {
+   "group": "volume/symlink-into",
+   "path": "{TMP}/links/vol_6/child",
+   "protected": true,
+   "note": "symlink -> Ext/Library/CoreServices"
+  },
+  {
+   "group": "volume/ordinary",
+   "path": "{VOLUMES}/Ext/Users/me/file.txt",
+   "protected": false
+  },
+  {
+   "group": "volume/ordinary",
+   "path": "{VOLUMES}/Ext/Library/Caches/x",
+   "protected": false
+  },
+  {
+   "group": "volume/root",
+   "path": "{VOLUMES}/Ext",
+   "protected": false,
+   "note": "a volume root itself is not denied, only OS subpaths"
+  },
+  {
+   "group": "volume/not-mounted",
+   "path": "{VOLUMES}/NotMounted/System/x",
+   "protected": false,
+   "note": "volume roots are enumerated from the volumes dir; an absent one contributes no rules"
+  },
+  {
+   "group": "volume/symlinked-root",
+   "path": "{TMP}/fakeroot/System/x",
+   "protected": true,
+   "note": "root resolved through the volume symlink"
+  },
+  {
+   "group": "volume/symlinked-root",
+   "path": "{TMP}/fakeroot/SYSTEM/x",
+   "protected": true
+  },
+  {
+   "group": "volume/symlinked-root",
+   "path": "{VOLUMES}/BootAlias/usr/x",
+   "protected": true
+  },
+  {
+   "group": "volume/symlinked-root",
+   "path": "{TMP}/fakeroot/Users/x",
+   "protected": false
+  },
+  {
+   "group": "volume/unicode",
+   "path": "{VOLUMES}/Donn\u00e9es/System/x",
+   "protected": true,
+   "note": "NFC spelling"
+  },
+  {
+   "group": "volume/unicode",
+   "path": "{VOLUMES}/Donne\u0301es/System/x",
+   "protected": true,
+   "note": "NFD spelling of the same volume"
+  },
+  {
+   "group": "volume/unicode",
+   "path": "{VOLUMES}/DONNE\u0301ES/system/x",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "volume/unicode",
+   "path": "{VOLUMES}/Donne\u0301es/Users/x",
+   "protected": false
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/.ssh",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/.ssh/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/.ssh/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/.SSH/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/.SSH/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/.ssh/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/.SSH/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/.sshx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_0/child",
+   "protected": true,
+   "note": "symlink -> ~/.ssh"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_0/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/.gnupg",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/.gnupg/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/.gnupg/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/.GNUPG/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/.GNUPG/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/.gnupg/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/.GNUPG/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/.gnupgx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_1/child",
+   "protected": true,
+   "note": "symlink -> ~/.gnupg"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_1/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Keychains",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Keychains/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/keychains/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/KEYCHAINS/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/kEYCHAINS/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Keychains/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/KEYCHAINS/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Keychainsx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_2/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Keychains"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_2/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Mail",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Mail/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/mail/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/MAIL/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/mAIL/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Mail/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/MAIL/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Mailx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_3/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Mail"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_3/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Messages",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Messages/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/messages/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/MESSAGES/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/mESSAGES/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Messages/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/MESSAGES/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Messagesx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_4/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Messages"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_4/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Photos",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Photos/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/photos/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/PHOTOS/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/pHOTOS/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Photos/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/PHOTOS/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Photosx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_5/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Photos"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_5/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Mobile Documents",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Mobile Documents/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/mobile documents/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/MOBILE DOCUMENTS/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/mOBILE dOCUMENTS/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Mobile Documents/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/MOBILE DOCUMENTS/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Mobile Documentsx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_6/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Mobile Documents"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_6/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Accounts",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Accounts/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/accounts/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/ACCOUNTS/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/aCCOUNTS/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Accounts/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/ACCOUNTS/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Accountsx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_7/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Accounts"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_7/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Passes",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Passes/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/passes/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/PASSES/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/pASSES/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Passes/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/PASSES/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Passesx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_8/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Passes"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_8/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/exact",
+   "path": "{HOME}/Library/Wallet",
+   "protected": true
+  },
+  {
+   "group": "home/child",
+   "path": "{HOME}/Library/Wallet/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/library/wallet/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME}/LIBRARY/WALLET/child",
+   "protected": true
+  },
+  {
+   "group": "home/case-variant",
+   "path": "{HOME_SWAPCASE}/lIBRARY/wALLET/child",
+   "protected": true,
+   "note": "home dir case-varied too"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/Library/Wallet/child",
+   "protected": true,
+   "note": "home dir spelled NFD"
+  },
+  {
+   "group": "home/nfd",
+   "path": "{HOME_NFD}/LIBRARY/WALLET/child",
+   "protected": true,
+   "note": "NFD + case-varied"
+  },
+  {
+   "group": "home/boundary",
+   "path": "{HOME}/Library/Walletx/child",
+   "protected": false
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/links/home_9/child",
+   "protected": true,
+   "note": "symlink -> ~/Library/Wallet"
+  },
+  {
+   "group": "home/symlink-into",
+   "path": "{TMP}/LINKS/HOME_9/child",
+   "protected": true,
+   "note": "case-varied symlink name",
+   "requires": "case-insensitive-fs"
+  },
+  {
+   "group": "home/itself",
+   "path": "{HOME}",
+   "protected": true,
+   "note": "the home directory itself is never a candidate"
+  },
+  {
+   "group": "home/itself",
+   "path": "{HOME}/",
+   "protected": true,
+   "note": "trailing slash"
+  },
+  {
+   "group": "home/itself",
+   "path": "{HOME_SWAPCASE}",
+   "protected": true
+  },
+  {
+   "group": "home/itself",
+   "path": "{HOME_NFD}",
+   "protected": true
+  },
+  {
+   "group": "home/itself",
+   "path": "{HOME}/Documents/..",
+   "protected": true,
+   "note": "'..' back up to home"
+  },
+  {
+   "group": "home/ordinary",
+   "path": "{HOME}/Documents",
+   "protected": false
+  },
+  {
+   "group": "home/ordinary",
+   "path": "{HOME}/Documents/report.txt",
+   "protected": false
+  },
+  {
+   "group": "home/ordinary",
+   "path": "{HOME}/Library/Caches/com.example/blob",
+   "protected": false
+  },
+  {
+   "group": "home/ordinary",
+   "path": "{HOME_NFD}/Documents/report.txt",
+   "protected": false
+  },
+  {
+   "group": "home/ordinary",
+   "path": "{HOME}/Library",
+   "protected": false,
+   "note": "parent of denied subpaths is not itself denied"
+  },
+  {
+   "group": "home/parent",
+   "path": "{TMP}",
+   "protected": false,
+   "note": "parent of home is not denied"
+  },
+  {
+   "group": "dotdot",
+   "path": "/usr/local/../bin/x",
+   "protected": true
+  },
+  {
+   "group": "dotdot",
+   "path": "/System/../usr/x",
+   "protected": true
+  },
+  {
+   "group": "dotdot",
+   "path": "/System/../tmp/x",
+   "protected": false,
+   "note": "'..' escapes the denied dir to /tmp"
+  },
+  {
+   "group": "dotdot",
+   "path": "{HOME}/Documents/../.ssh/id_rsa",
+   "protected": true
+  },
+  {
+   "group": "dotdot",
+   "path": "{HOME}/Documents/../.SSH/id_rsa",
+   "protected": true
+  },
+  {
+   "group": "dotdot",
+   "path": "{HOME}/.ssh/../Documents/x",
+   "protected": false,
+   "note": "'..' escapes the denied dir"
+  },
+  {
+   "group": "dotdot",
+   "path": "{TMP}/links/home_0/../Documents/x",
+   "protected": false,
+   "note": "'..' applies to the symlink TARGET (~/.ssh/.. = ~)"
+  },
+  {
+   "group": "dotdot",
+   "path": "{TMP}/links/home_0/../.gnupg/x",
+   "protected": true,
+   "note": "'..' applies to the symlink target, landing in ~/.gnupg"
+  },
+  {
+   "group": "nonexistent",
+   "path": "/System/does/not/exist",
+   "protected": true
+  },
+  {
+   "group": "nonexistent",
+   "path": "/SYSTEM/does/not/exist",
+   "protected": true
+  },
+  {
+   "group": "nonexistent",
+   "path": "{HOME}/.SSH/nope/nope",
+   "protected": true
+  },
+  {
+   "group": "nonexistent",
+   "path": "{HOME}/library/mail/nope",
+   "protected": true
+  },
+  {
+   "group": "nonexistent",
+   "path": "{TMP}/nope/nope/nope",
+   "protected": false
+  },
+  {
+   "group": "nonexistent",
+   "path": "/no-such-top-level/System/x",
+   "protected": false,
+   "note": "'System' only matters directly under a volume root"
+  },
+  {
+   "group": "private",
+   "path": "/etc/hosts",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/private/etc/hosts",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/ETC/hosts",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/PRIVATE/ETC/hosts",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/Private/Etc/hosts",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/var/db/x",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/VAR/DB/x",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/private/var/DB/x",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/var/root/x",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/var/vm/swapfile0",
+   "protected": true
+  },
+  {
+   "group": "private",
+   "path": "/tmp",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/tmp/x",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/private/tmp/x",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/TMP/x",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/var/folders/ab/x",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/var/tmp/x",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/private/var/log/x",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/private",
+   "protected": false
+  },
+  {
+   "group": "private",
+   "path": "/",
+   "protected": false
+  },
+  {
+   "group": "dangling",
+   "path": "{TMP}/links/dangling",
+   "protected": false
+  },
+  {
+   "group": "dangling",
+   "path": "{TMP}/links/dangling/child",
+   "protected": false
+  },
+  {
+   "group": "dangling",
+   "path": "{TMP}/links/dangling_system",
+   "protected": true
+  },
+  {
+   "group": "dangling",
+   "path": "{TMP}/links/dangling_system/child",
+   "protected": true
+  },
+  {
+   "group": "dangling",
+   "path": "{TMP}/links/dangling_ssh",
+   "protected": true
+  },
+  {
+   "group": "dangling",
+   "path": "{TMP}/links/dangling_ssh_case",
+   "protected": true,
+   "note": "dangling target spelled with different case"
+  },
+  {
+   "group": "loop",
+   "path": "{HOME}/.ssh/loop_a",
+   "protected": true,
+   "note": "a symlink loop inside a denied dir is still denied"
+  },
+  {
+   "group": "chain",
+   "path": "{TMP}/links/chain_1/child",
+   "protected": true,
+   "note": "link -> link -> link -> ~/Library/Mail"
+  },
+  {
+   "group": "self",
+   "path": "{SELF}",
+   "protected": true
+  },
+  {
+   "group": "self",
+   "path": "{SELF}/safety.py",
+   "protected": true
+  },
+  {
+   "group": "self",
+   "path": "{SELF_SWAPCASE}/safety.py",
+   "protected": true
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/keep",
+   "protected": true,
+   "extra_protected": [
+    "{TMP}/keep"
+   ]
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/keep/x",
+   "protected": true,
+   "extra_protected": [
+    "{TMP}/keep"
+   ]
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/KEEP/x",
+   "protected": true,
+   "extra_protected": [
+    "{TMP}/keep"
+   ]
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/keeper/x",
+   "protected": false,
+   "note": "string-prefix sibling",
+   "extra_protected": [
+    "{TMP}/keep"
+   ]
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/links/to_keep/x",
+   "protected": true,
+   "note": "candidate reaches it through a symlink",
+   "extra_protected": [
+    "{TMP}/keep"
+   ]
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/keep/x",
+   "protected": false,
+   "note": "no extra_protected given"
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/keep/x",
+   "protected": true,
+   "note": "extra_protected itself given as a symlink",
+   "extra_protected": [
+    "{TMP}/links/to_keep"
+   ]
+  },
+  {
+   "group": "extra",
+   "path": "{TMP}/keep/x",
+   "protected": true,
+   "note": "extra_protected given case-varied",
+   "extra_protected": [
+    "{TMP}/KEEP"
+   ]
+  },
+  {
+   "group": "extra/unicode",
+   "path": "{TMP}/cafe\u0301/x",
+   "protected": true,
+   "note": "config NFC, candidate NFD",
+   "extra_protected": [
+    "{TMP}/caf\u00e9"
+   ]
+  },
+  {
+   "group": "extra/unicode",
+   "path": "{TMP}/caf\u00e9/x",
+   "protected": true,
+   "note": "config NFD, candidate NFC",
+   "extra_protected": [
+    "{TMP}/cafe\u0301"
+   ]
+  },
+  {
+   "group": "extra/unicode",
+   "path": "{TMP}/CAFE\u0301/x",
+   "protected": true,
+   "note": "NFD + case",
+   "extra_protected": [
+    "{TMP}/caf\u00e9"
+   ]
+  },
+  {
+   "group": "relative",
+   "path": ".ssh/id_rsa",
+   "protected": true,
+   "note": "resolved against cwd = {HOME}"
+  },
+  {
+   "group": "relative",
+   "path": "Documents/../.SSH/id_rsa",
+   "protected": true
+  },
+  {
+   "group": "relative",
+   "path": "Documents/report.txt",
+   "protected": false
+  },
+  {
+   "group": "relative",
+   "path": ".",
+   "protected": true,
+   "note": "cwd is the home directory itself"
+  },
+  {
+   "group": "ordinary",
+   "path": "{TMP}/ordinary/file.log",
+   "protected": false
+  },
+  {
+   "group": "ordinary",
+   "path": "{TMP}/ordinary/System/x",
+   "protected": false,
+   "note": "'System' deep inside a tree is not a volume-root subpath"
+  },
+  {
+   "group": "ordinary",
+   "path": "/Library/Caches/x",
+   "protected": false
+  },
+  {
+   "group": "ordinary",
+   "path": "/Library/Application Support/x",
+   "protected": false
+  },
+  {
+   "group": "ordinary",
+   "path": "/Users/Shared/x",
+   "protected": false
+  },
+  {
+   "group": "ordinary",
+   "path": "/opt/homebrew/x",
+   "protected": false
+  }
+ ]
+}

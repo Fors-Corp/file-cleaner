@@ -50,6 +50,22 @@ def test_quarantine_refuses_protected_path(sandbox_config, sandbox_home):
     assert target.exists()
 
 
+def test_quarantine_refuses_case_variant_of_protected_path(sandbox_config, sandbox_home):
+    """A hand-edited plan can spell a protected directory in a different
+    case; on a case-insensitive volume that spelling opens the real thing,
+    so the pre-move gate has to see through it."""
+    key = sandbox_home / ".ssh" / "id_rsa"
+    key.parent.mkdir()
+    key.write_bytes(b"secret")
+    spelled = sandbox_home / ".SSH" / "id_rsa"
+
+    result = quarantine.quarantine_candidates([_make_candidate(spelled, size=6)], sandbox_config)
+
+    assert result.entries == []
+    assert [s.reason for s in result.skipped] == ["protected path"]
+    assert key.read_bytes() == b"secret"
+
+
 def test_quarantine_refuses_own_data_dir(sandbox_config, sandbox_home):
     """The tool's own config/data/quarantine directories must never be
     quarantinable — that would eat the safety net itself."""

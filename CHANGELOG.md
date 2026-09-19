@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-09-19
+
+### Security
+- The deny-list no longer depends on how a path is spelled. macOS volumes
+  are case-insensitive and Unicode-normalisation-insensitive by default,
+  and `Path.resolve()` only rewrites a component when it is a symlink — so
+  `~/library/mail`, `~/.SSH/id_rsa`, `/system/Library`, or a home directory
+  spelled in NFD all opened the real protected directories while comparing
+  unequal to the deny-list, and were treated as ordinary, movable paths.
+  Both the scan-time filter and the pre-move/restore/purge gate shared the
+  check, so neither caught it. Such a spelling could come from a custom
+  rule's glob prefix (joined as typed), a hand-edited `plan.json`, or a
+  root passed to `duplicates`/`leftovers`. Every deny comparison — absolute
+  paths, per-volume and per-home subpaths, File Cleaner's own code, and
+  `protected_paths` from config — now uses Unicode canonical caseless
+  matching on both sides.
+- A path that cannot be resolved at all is now treated as protected rather
+  than compared unresolved: if it cannot be shown to be safe, it is not
+  touched.
+
+The check is strictly stricter than before, never looser: folding is
+applied even on a case-sensitive volume, where it can only protect more.
+The scanned-roots allow-list is deliberately left case-sensitive, since
+folding an allow-list would loosen it.
+
+### Added
+- `tests/safety_cases.json`: a language-neutral conformance table for the
+  deny-list (370 path/expected pairs plus the fixture tree they need) —
+  case variants of and a symlink into every deny entry, NFC/NFD forms,
+  `..` segments, non-existent tails, the `/etc`–`/private/etc` family,
+  `/tmp`, mounted volumes, dangling and chained symlinks — so a port to
+  another language can run the identical cases. A completeness test fails
+  if a deny entry is added without its rows.
+
 ## [1.3.0] - 2026-09-13
 
 Smart folder reorganization and real permanent deletion for duplicates and
