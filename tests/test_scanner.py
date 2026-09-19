@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from filecleaner import scanner
@@ -381,3 +383,42 @@ class TestProtectedPathsDuringWalk:
         # Reported as typed (through the alias); ~/Library/Mail is recognised
         # through the alias and skipped.
         assert [c.path for c in result.candidates] == [box / "alias" / "Library" / "Logs" / "app.emlx"]
+
+
+class TestProgress:
+    @staticmethod
+    def _scan(tmp_path, sandbox_config, monkeypatch, **kwargs):
+        monkeypatch.setattr(scanner, "_PROGRESS_EVERY_DIRS", 1)
+        scoped = tmp_path / "scoped"
+        for name in ("a", "b", "c"):
+            (scoped / name).mkdir(parents=True)
+            (scoped / name / "old.log").write_bytes(b"x")
+        sandbox_config["rules"] = [{"id": "logfiles", "include": ["**/*.log"], "min_age_days": 0}]
+        seen: list[tuple[str, float | None]] = []
+        if kwargs.pop("with_total", False):
+            kwargs["total_dirs"] = scanner.count_total_dirs(
+                sandbox_config, only_rules={"logfiles"}, include_disabled=True, root=scoped
+            )
+        scanner.run_scan(
+            sandbox_config,
+            only_rules={"logfiles"},
+            include_disabled=True,
+            root=scoped,
+            progress=lambda message, percent: seen.append((message, percent)),
+            **kwargs,
+        )
+        return [(m, p) for m, p in seen if "scanning" in m]
+
+    def test_reports_a_running_folder_count_when_no_total_is_known(self, tmp_path, sandbox_config, monkeypatch):
+        walking = self._scan(tmp_path, sandbox_config, monkeypatch)
+
+        assert len(walking) == 4  # scoped + a, b, c
+        assert all(percent is None for _, percent in walking)
+        counts = [int(re.match(r"([\d,]+) folders · ", m).group(1).replace(",", "")) for m, _ in walking]
+        assert counts == [1, 2, 3, 4]
+
+    def test_reports_a_percentage_against_a_counted_total(self, tmp_path, sandbox_config, monkeypatch):
+        walking = self._scan(tmp_path, sandbox_config, monkeypatch, with_total=True)
+
+        assert [percent for _, percent in walking] == [25.0, 50.0, 75.0, 100.0]
+        assert not any("folders ·" in message for message, _ in walking)

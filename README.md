@@ -295,8 +295,8 @@ mouse-only:
 | `q` | Quit |
 
 **Scan** is the original candidate browser: select matches, see live disk usage, and
-confirm before anything moves — a percentage tracks real progress against a quick,
-cheap directory-count pre-pass, not just a spinner. **Rules** lists every builtin and
+confirm before anything moves — a running count of folders scanned shows the scan is
+live, without walking the tree a second time just to compute a percentage. **Rules** lists every builtin and
 custom rule with its category, risk, and effective thresholds; toggling one writes
 straight to `rule_overrides`, and `e` opens a small dialog to override a rule's
 `min_age_days`/`min_size_bytes` without redefining it as a custom rule (leaving a field

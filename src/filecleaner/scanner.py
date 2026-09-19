@@ -231,7 +231,13 @@ class _WalkContext:
         self.dirs_seen += 1
         self.counter.increment()
         if self.progress is not None and self.dirs_seen % _PROGRESS_EVERY_DIRS == 0:
-            self.progress(f"{self.rule.label}: scanning {rel or '.'}", self.counter.percent())
+            message = f"{self.rule.label}: scanning {rel or '.'}"
+            percent = self.counter.percent()
+            if percent is None:
+                # No counting pre-pass to measure against: say how far the
+                # walk has got instead, so progress is still visibly live.
+                message = f"{self.counter.done:,} folders · {message}"
+            self.progress(message, percent)
 
 
 def _iter_dir(path: str) -> Iterator[os.DirEntry[str]]:
@@ -525,9 +531,10 @@ def count_total_dirs(
 
     This is meaningfully cheaper than a real scan (no per-file ``stat``
     calls, no recursive size totals for matched directories) but it is not
-    free — it still touches every directory a scan would. Call it only
-    where the resulting percentage is worth that extra walk (the TUI's
-    scan screen), not on every CLI invocation.
+    free — it still touches every directory a scan would. Nothing in File
+    Cleaner calls it by default any more: without it, ``run_scan`` reports
+    a running folder count instead. Call it only where a true percentage
+    is worth walking the tree twice.
     """
     selected = select_rules(config, only_rules=only_rules, include_disabled=include_disabled, rules=rules)
     effective_root, _roots, root_in_roots, volume_roots, extra_protected = _scan_setup(
