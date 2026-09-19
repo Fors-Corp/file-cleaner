@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-09-19
+
+### Fixed
+- `fclean duplicates` no longer reads files that macOS has evicted to iCloud.
+  Such a file is a placeholder (`SF_DATALESS`), and its contents are
+  downloaded the moment anything reads them — so with "Desktop & Documents"
+  in iCloud Drive, looking for duplicates under home blocked for hours
+  (651,902 evicted files on the machine this was found on) and filled the
+  very disk it was meant to free. A file whose contents are not on this disk
+  wastes no space on it, so it is no duplicate worth finding: same-size
+  candidates are now checked before anything is opened, and an evicted one is
+  left alone. The same three folders: from not finishing in half an hour to
+  17.5 s, with nothing downloaded. (`large-files` and `scan` never read
+  contents, and still count such a file at its full size.)
+- One damaged `Info.plist` no longer takes a whole command down. A truncated
+  XML plist escapes `plistlib` as an `ExpatError` (a bad number as a
+  `ValueError`, a bad date as an `AttributeError`), which nothing caught:
+  `fclean backups list` died on one damaged backup, and `fclean leftovers`
+  on one damaged app bundle. A plist that cannot be read now simply names
+  nothing, as a missing one always did.
+- `fclean leftovers` lists `~/Library/Containers` and its neighbours through
+  the retrying listing of 1.6.1. It was the one walk of another app's sandbox
+  still using a bare `iterdir()`, so an interrupted listing (`EINTR`, after a
+  hang) silently hid every leftover in that folder.
+
 ## [1.7.1] - 2026-09-19
 
 ### Fixed

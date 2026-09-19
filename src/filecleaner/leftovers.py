@@ -22,13 +22,12 @@ touches the filesystem.
 from __future__ import annotations
 
 import os
-import plistlib
 import time
 from pathlib import Path
 from typing import Any
 
 from filecleaner import config as config_mod
-from filecleaner import safety
+from filecleaner import listing, plists, safety
 from filecleaner.models import Candidate
 from filecleaner.scanner import dir_stats_many
 
@@ -61,13 +60,7 @@ def installed_apps() -> tuple[set[str], set[str]]:
             if entry.suffix != ".app":
                 continue
             names.add(entry.stem)
-            plist_path = entry / "Contents" / "Info.plist"
-            try:
-                with plist_path.open("rb") as f:
-                    data = plistlib.load(f)
-            except (OSError, plistlib.InvalidFileException):
-                continue
-            bundle_id = data.get("CFBundleIdentifier")
+            bundle_id = plists.load_dict(entry / "Contents" / "Info.plist").get("CFBundleIdentifier")
             if isinstance(bundle_id, str):
                 bundle_ids.add(bundle_id)
     return bundle_ids, names
@@ -95,7 +88,8 @@ def find_app_leftovers(
     for subdir_name in _LIBRARY_SUBDIRS:
         base = home / "Library" / subdir_name
         try:
-            entries = list(base.iterdir())
+            # Containers is where macOS interrupts listings (see ``listing``).
+            entries = [base / entry.name for entry in listing.list_dir(str(base))]
         except OSError:
             continue
         for entry in entries:
