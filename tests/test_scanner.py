@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from filecleaner import scanner
+from filecleaner import filewalk, listing, scanner
 from filecleaner.models import Candidate, Rule
 
 
@@ -388,11 +388,12 @@ class TestProtectedPathsDuringWalk:
 class TestInterruptedListings:
     """macOS now and then fails the opening of a directory inside another
     app's sandbox with EINTR, after a hang; asked again it answers at once.
-    An interrupted listing is retried, not reported as an unreadable folder."""
+    An interrupted listing is retried, not reported as an unreadable folder —
+    nor, by a walk with nowhere to report it, left out without a word."""
 
     @staticmethod
     def _interrupting(monkeypatch, times, only=None):
-        real, failures = scanner.os.scandir, {}
+        real, failures = listing.os.scandir, {}
 
         def scandir(path):
             if only is None or str(path).endswith(only):
@@ -401,7 +402,7 @@ class TestInterruptedListings:
                     raise InterruptedError(4, "Interrupted system call")
             return real(path)
 
-        monkeypatch.setattr(scanner.os, "scandir", scandir)
+        monkeypatch.setattr(listing.os, "scandir", scandir)
         return failures
 
     def test_the_scan_reads_a_directory_that_was_interrupted(self, sandbox_config, sandbox_home, monkeypatch):
@@ -429,7 +430,7 @@ class TestInterruptedListings:
 
         assert result.candidates == []
         assert len(result.errors) == 1 and "Interrupted system call" in result.errors[0]
-        assert max(failures.values()) == scanner._LISTING_RETRIES + 1
+        assert max(failures.values()) == listing.LISTING_RETRIES + 1
 
     def test_sizing_a_folder_survives_an_interruption(self, sandbox_home, monkeypatch):
         (sandbox_home / "box" / "inner").mkdir(parents=True)
@@ -439,6 +440,33 @@ class TestInterruptedListings:
 
         assert scanner.dir_stats(sandbox_home / "box") == expected
         assert expected[0] == 321
+
+    def test_the_file_walk_reads_a_directory_that_was_interrupted(self, sandbox_home, monkeypatch):
+        """What duplicates and large-files are built on. An ``os.walk`` here
+        swallowed the error, and both under-reported with nothing to show it."""
+        monkeypatch.setenv("FCLEAN_NATIVE_WALK", "0")
+        (sandbox_home / "box" / "inner" / "deeper").mkdir(parents=True)
+        (sandbox_home / "box" / "beside.bin").write_bytes(b"x" * 10)
+        (sandbox_home / "box" / "inner" / "data.bin").write_bytes(b"x" * 321)
+        (sandbox_home / "box" / "inner" / "deeper" / "more.bin").write_bytes(b"x" * 20)
+        failures = self._interrupting(monkeypatch, times=3, only="/inner")
+
+        found = {p.name: st.st_size for p, st in filewalk.walk_unique_files([sandbox_home / "box"])}
+
+        assert found == {"beside.bin": 10, "data.bin": 321, "more.bin": 20}
+        assert list(failures.values()) == [4]  # three interruptions, then the listing that answered
+
+    def test_the_file_walk_gives_up_on_a_directory_that_is_always_interrupted(self, sandbox_home, monkeypatch):
+        monkeypatch.setenv("FCLEAN_NATIVE_WALK", "0")
+        (sandbox_home / "box" / "inner").mkdir(parents=True)
+        (sandbox_home / "box" / "beside.bin").write_bytes(b"x" * 10)
+        (sandbox_home / "box" / "inner" / "data.bin").write_bytes(b"x" * 321)
+        failures = self._interrupting(monkeypatch, times=10**6, only="/inner")
+
+        found = [p.name for p, _ in filewalk.walk_unique_files([sandbox_home / "box"])]
+
+        assert found == ["beside.bin"]
+        assert max(failures.values()) == listing.LISTING_RETRIES + 1
 
 
 class TestProgress:
