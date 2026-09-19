@@ -15,7 +15,14 @@
 //!   end       {"done": dirs_total}
 //! `fclean-walk key` instead maps a JSON array of strings to their deny-list
 //! comparison keys (used to prove the key matches Python's `safety._key`).
+//!
+//! `fclean-walk files` is the walk behind `duplicates` and `large-files`
+//! (a port of `filewalk.walk_unique_files`): every regular file under the
+//! given roots, once per physical file, at least `min_size` bytes.
+//!   file      {"f": path, "r": root index, "s": bytes, "t": mtime}
+//!   end       {"done": files_reported}
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -171,12 +178,18 @@ mod bulk {
     use std::io;
 
     const ATTR_BIT_MAP_COUNT: u16 = 5;
+    // Attributes come back packed in ascending bit order within each group
+    // (ATTR_CMN_ERROR excepted: it follows the returned-attributes set).
     const ATTR_CMN_NAME: u32 = 0x0000_0001;
+    const ATTR_CMN_DEVID: u32 = 0x0000_0002;
     const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
     const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
+    const ATTR_CMN_FILEID: u32 = 0x0200_0000;
     const ATTR_CMN_ERROR: u32 = 0x2000_0000;
     const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+    const ATTR_FILE_LINKCOUNT: u32 = 0x0000_0001;
     const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
+    pub const VREG: u32 = 1;
     pub const VDIR: u32 = 2;
     pub const VLNK: u32 = 5;
 
@@ -200,6 +213,9 @@ mod bulk {
         pub vtype: u32,
         pub mtime_nanos: i64,
         pub size: u64,
+        pub dev: i64,
+        pub ino: u64,
+        pub nlink: u32,
     }
 
     struct Fd(c_int);
@@ -242,6 +258,7 @@ mod bulk {
             let bytes = record.get(start..start + length.checked_sub(1)?)?; // drop the NUL
             name = std::str::from_utf8(bytes).ok()?;
         }
+        let dev = if common & ATTR_CMN_DEVID != 0 { c.u32()? as i32 as i64 } else { 0 };
         let vtype = if common & ATTR_CMN_OBJTYPE != 0 { c.u32()? } else { 0 };
         let mtime_nanos = if common & ATTR_CMN_MODTIME != 0 {
             let (sec, nsec) = (c.i64()?, c.i64()?);
@@ -249,8 +266,10 @@ mod bulk {
         } else {
             0
         };
+        let ino = if common & ATTR_CMN_FILEID != 0 { c.i64()? as u64 } else { 0 };
+        let nlink = if file & ATTR_FILE_LINKCOUNT != 0 { c.u32()? } else { 0 };
         let size = if file & ATTR_FILE_DATALENGTH != 0 { c.i64()?.max(0) as u64 } else { 0 };
-        Some(Entry { name, vtype, mtime_nanos, size })
+        Some(Entry { name, vtype, mtime_nanos, size, dev, ino, nlink })
     }
 
     /// Calls `each` for every entry of `dir`. `Err` means nothing was
@@ -265,10 +284,16 @@ mod bulk {
         let mut list = AttrList {
             bitmapcount: ATTR_BIT_MAP_COUNT,
             reserved: 0,
-            commonattr: ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | ATTR_CMN_NAME | ATTR_CMN_OBJTYPE | ATTR_CMN_MODTIME,
+            commonattr: ATTR_CMN_RETURNED_ATTRS
+                | ATTR_CMN_ERROR
+                | ATTR_CMN_NAME
+                | ATTR_CMN_DEVID
+                | ATTR_CMN_OBJTYPE
+                | ATTR_CMN_MODTIME
+                | ATTR_CMN_FILEID,
             volattr: 0,
             dirattr: 0,
-            fileattr: ATTR_FILE_DATALENGTH,
+            fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_DATALENGTH,
             forkattr: 0,
         };
         let mut buf = vec![0u8; 256 * 1024];
@@ -507,6 +532,155 @@ fn start<'s>(scope: &rayon::Scope<'s>, ctx: &'s Ctx, group: Vec<&'s Walk>) {
     scope.spawn(move |s| visit(s, ctx, active, start, resolved, start_rel, depth));
 }
 
+// -------------------------------------------------------------------- files
+// A port of filewalk.walk_unique_files. One file can be reached by more than
+// one path (overlapping roots, a root respelled in another case, a symlinked
+// root, a second hard link) and must still be reported once. As there:
+// a file with a single link lives in exactly one directory, so remembering
+// the directories visited — by (st_dev, st_ino), never by path — is enough;
+// only hard-linked files are remembered one by one.
+
+#[derive(Deserialize)]
+struct FilesRequest {
+    #[serde(default)]
+    threads: usize,
+    deny_home: String,
+    deny_prefixes: Vec<String>,
+    roots: Vec<String>,
+    #[serde(default)]
+    min_size: u64,
+}
+
+struct Found {
+    path: String,
+    root: usize,
+    size: u64,
+    mtime_nanos: i64,
+}
+
+struct FilesCtx {
+    deny: Deny,
+    min_size: u64,
+    out: Mutex<BufWriter<io::Stdout>>,
+    reported: AtomicU64,
+    seen_dirs: Mutex<HashSet<(u64, u64)>>,
+    // Which name of a hard-linked file a parallel walk meets first is a
+    // matter of timing, so they are held back and the smallest path wins.
+    hard_links: Mutex<HashMap<(i64, u64), Found>>,
+}
+
+impl FilesCtx {
+    fn report(&self, found: &Found) {
+        if found.size < self.min_size {
+            return;
+        }
+        self.reported.fetch_add(1, Ordering::Relaxed);
+        let value = json!({"f": found.path, "r": found.root, "s": found.size, "t": found.mtime_nanos as f64 / 1e9});
+        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        if serde_json::to_writer(&mut *out, &value).is_err() || out.write_all(b"\n").is_err() {
+            std::process::exit(1);
+        }
+    }
+
+    fn regular_file(&self, found: Found, dev: i64, ino: u64, nlink: u32) {
+        if nlink <= 1 {
+            self.report(&found);
+            return;
+        }
+        let mut links = self.hard_links.lock().unwrap_or_else(|e| e.into_inner());
+        match links.get(&(dev, ino)) {
+            Some(held) if held.path <= found.path => {}
+            _ => {
+                links.insert((dev, ino), found);
+            }
+        }
+    }
+}
+
+fn files_visit<'s>(scope: &rayon::Scope<'s>, ctx: &'s FilesCtx, root: usize, dir: String, resolved: String) {
+    // stat, not lstat: only a root can be a symlink, and it is to be followed.
+    let Ok(meta) = fs::metadata(&dir) else { return };
+    let first_visit = ctx.seen_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert((meta.dev(), meta.ino()));
+    if !first_visit {
+        return;
+    }
+    let descend = |name: &str| {
+        let child_resolved = format!("{resolved}/{name}");
+        if !ctx.deny.covers(&child_resolved) {
+            let child = join(&dir, name);
+            scope.spawn(move |s| files_visit(s, ctx, root, child, child_resolved));
+        }
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let listed = bulk::list(&dir, |entry| match entry.vtype {
+            bulk::VDIR => descend(entry.name),
+            bulk::VREG => {
+                let found = Found { path: join(&dir, entry.name), root, size: entry.size, mtime_nanos: entry.mtime_nanos };
+                ctx.regular_file(found, entry.dev, entry.ino, entry.nlink);
+            }
+            _ => {} // symlinks are never followed; FIFOs, sockets and devices are not files to compare
+        });
+        if listed.is_ok() {
+            return;
+        }
+    }
+    let Ok(entries) = fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        let Ok(file_type) = entry.file_type() else { continue };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            descend(&name);
+        } else if file_type.is_file() {
+            let Ok(meta) = entry.metadata() else { continue }; // lstat
+            let found = Found { path: join(&dir, &name), root, size: meta.len(), mtime_nanos: mtime_nanos(&meta) };
+            ctx.regular_file(found, meta.dev() as i64, meta.ino(), meta.nlink() as u32);
+        }
+    }
+}
+
+fn files_main(input: &str) {
+    let request: FilesRequest =
+        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad files request: {err}")));
+    let mut pool = rayon::ThreadPoolBuilder::new();
+    if request.threads > 0 {
+        pool = pool.num_threads(request.threads);
+    }
+    if let Err(err) = pool.build_global() {
+        fail(format!("cannot start thread pool: {err}"));
+    }
+    let ctx = FilesCtx {
+        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes },
+        min_size: request.min_size,
+        out: Mutex::new(BufWriter::with_capacity(1 << 20, io::stdout())),
+        reported: AtomicU64::new(0),
+        seen_dirs: Mutex::new(HashSet::new()),
+        hard_links: Mutex::new(HashMap::new()),
+    };
+    // One root at a time, each walked in parallel: when two roots reach the
+    // same directory, the earlier root keeps it, as in the Python walk.
+    for (index, root) in request.roots.iter().enumerate() {
+        let Ok(canonical) = fs::canonicalize(root) else { continue };
+        let Some(resolved) = canonical.to_str().map(|s| s.trim_end_matches('/').to_owned()) else { continue };
+        let ctx = &ctx;
+        rayon::scope(|scope| files_visit(scope, ctx, index, root.clone(), resolved));
+    }
+    let mut held: Vec<Found> = ctx.hard_links.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, f)| f).collect();
+    held.sort_by(|a, b| a.path.cmp(&b.path));
+    for found in &held {
+        ctx.report(found);
+    }
+    let value = json!({"done": ctx.reported.load(Ordering::Relaxed)});
+    let mut out = ctx.out.lock().unwrap_or_else(|e| e.into_inner());
+    if serde_json::to_writer(&mut *out, &value).is_err() || out.write_all(b"\n").is_err() || out.flush().is_err() {
+        std::process::exit(1);
+    }
+}
+
 // --------------------------------------------------------------------- main
 
 fn fail(message: String) -> ! {
@@ -525,6 +699,11 @@ fn main() {
             serde_json::from_str(&input).unwrap_or_else(|err| fail(format!("bad key request: {err}")));
         let keys: Vec<String> = strings.iter().map(|s| key(s)).collect();
         println!("{}", serde_json::to_string(&keys).expect("strings serialise"));
+        return;
+    }
+
+    if std::env::args().nth(1).as_deref() == Some("files") {
+        files_main(&input);
         return;
     }
 

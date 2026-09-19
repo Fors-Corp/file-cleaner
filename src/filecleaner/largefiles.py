@@ -33,7 +33,9 @@ def find_large_files(
     extra_protected = config_mod.extra_protected_paths(config) + config_mod.data_paths_to_protect(config)
     heap: list[tuple[int, str, float]] = []
     files_seen = 0
-    for file_path, st in filewalk.walk_unique_files(roots, extra_protected=extra_protected):
+    for file_path, st in filewalk.walk_unique_files(
+        roots, extra_protected=extra_protected, min_size=min_size_bytes
+    ):
         files_seen += 1
         if progress is not None and files_seen % _PROGRESS_EVERY_FILES == 0:
             progress(f"scanning {file_path.parent}")

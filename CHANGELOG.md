@@ -5,6 +5,43 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-19
+
+### Added
+- `fclean duplicates` and `fclean large-files` now use the native walker
+  too (when it is installed). Their shared file walk had the same shape
+  the scan had: one `lstat` per file, on one core, bound by I/O latency —
+  229 s for a home directory of 3.2M files. `fclean-walk files` lists
+  directories on every core and reads name, type, size, mtime, inode,
+  device and link count for a whole directory per `getattrlistbulk(2)`
+  call, applying the minimum size natively so only files that matter are
+  sent back. The same walk now takes about 28 s, of which Python's share
+  (parsing and re-checking ~860k records) is about 4 CPU-seconds.
+  Hashing is unchanged and still done in Python.
+
+The 1.5.2 guarantee does not move into the helper. It de-duplicates
+directories and hard links by `(st_dev, st_ino)` exactly as the Python
+walk does, but it remains an accelerator whose word is not taken for
+anything that matters: every file it reports must lie under the root it
+claims and pass the deny-list again in Python; what counts as a duplicate
+is decided by Python hashing the real bytes; and `find_duplicates` now
+re-verifies, by identity, that the members of every finished group are
+different physical files — for both walkers — in addition to the check
+`select_deletions` already makes before a delete. A helper that reports
+one file under two names therefore produces no duplicate group at all.
+
+### Changed
+- `filewalk.walk_unique_files` takes `min_size` and yields
+  `(path, FileStat)` — size and mtime, under `os.stat_result`'s names —
+  rather than a full `os.stat_result`. Which of a hard-linked file's names
+  is reported is now explicitly unspecified (first met in Python,
+  lexicographically smallest natively, so a parallel walk stays
+  deterministic).
+- When a helper is present but fails, the warning now says to re-run
+  `./install.sh` — the usual cause being an update that left an older
+  helper behind. An older helper is handled the same way as any other
+  failure: a warning, then the Python walk.
+
 ## [1.5.2] - 2026-09-19
 
 Fixes a data-loss bug in `fclean duplicates --apply`.
