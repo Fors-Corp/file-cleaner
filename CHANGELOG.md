@@ -5,7 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.1] - 2026-09-19
+
+### Fixed
+- Folders inside other apps' sandboxes (`~/Library/Containers`,
+  `~/Library/Group Containers`) could be skipped, or reported as unreadable,
+  at random. macOS checks every directory opened there, and now and then
+  that check hangs for five or six seconds and then fails the open with
+  `EINTR` — about once per pass on one core, dozens of times with every core
+  asking at once, which made walking those folders in parallel slower than
+  walking them on one core (12 s against 1.7 s). Asking again succeeds
+  within a millisecond. An interrupted listing is now retried, in the Python
+  scanner and in the helper, and inside those two places the helper
+  interrupts a call that has not returned in a quarter of a second instead
+  of waiting out the hang (`~/Library/Containers`: 12.0 s to about 1 s; all
+  of `~/Library`: 6.7–12.8 s to about 2 s, with the same folders listed on
+  every run). A whole-home scan takes as long as before: its time goes
+  elsewhere.
 
 ### Internal
 - First phase of the Rust port (`docs/PORT.md`). `fclean-walk` now carries a

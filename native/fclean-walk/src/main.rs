@@ -310,10 +310,16 @@ mod bulk {
         };
         let mut buf = vec![0u8; 256 * 1024];
         let mut delivered = false;
+        let mut interruptions = 0;
         loop {
             let count = unsafe { getattrlistbulk(fd.0, &mut list, buf.as_mut_ptr().cast(), buf.len(), 0) };
             if count < 0 {
-                return if delivered { Ok(()) } else { Err(io::Error::last_os_error()) };
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted && interruptions < super::LISTING_RETRIES {
+                    interruptions += 1; // nothing was consumed: ask again rather than stop short
+                    continue;
+                }
+                return if delivered { Ok(()) } else { Err(err) };
             }
             if count == 0 {
                 return Ok(());
@@ -334,6 +340,115 @@ mod bulk {
             delivered = true;
         }
     }
+}
+
+// --------------------------------------------------------------- containers
+
+/// `~/Library/Containers` and `~/Library/Group Containers` hold other apps'
+/// sandboxes, and macOS checks every directory opened inside them. Now and
+/// then that check hangs: the open blocks for five or six seconds and fails
+/// with EINTR — at random, about once per pass single-threaded and dozens of
+/// times with every core asking at once (12 s and more, against 1.7 s), and
+/// the interrupted directories go unread. Asking again succeeds within a
+/// millisecond, and the hang is an interruptible wait. So a call inside those
+/// two places that has not returned in a quarter of a second is interrupted,
+/// and everywhere an interrupted call is retried. (Listing them one at a time
+/// as well was tried: with hangs this cheap it only costs parallelism — 2-6 s
+/// for `~/Library` against 1.6-2.5 s.)
+mod unstick {
+    use std::sync::{Mutex, Once};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const FIRST_PATIENCE: Duration = Duration::from_millis(250);
+    /// Patience doubles with every poke, so a directory that really is slow
+    /// gets 0.25 + 0.5 + 1 + 2 + 4 s of tries and then as long as it needs.
+    const MAX_POKES: u32 = 5;
+    const TICK: Duration = Duration::from_millis(50);
+
+    struct Waiting {
+        id: u64,
+        thread: libc::pthread_t,
+        poke_at: Instant,
+        patience: Duration,
+        pokes: u32,
+    }
+
+    static WAITING: Mutex<(u64, Vec<Waiting>)> = Mutex::new((0, Vec::new()));
+    static STARTED: Once = Once::new();
+
+    extern "C" fn wake(_signal: libc::c_int) {} // being delivered is the whole point
+
+    fn start() {
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = wake as extern "C" fn(libc::c_int) as usize;
+            action.sa_flags = 0; // not SA_RESTART: the blocked call must fail with EINTR
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut());
+        }
+        thread::spawn(|| loop {
+            thread::sleep(TICK);
+            let now = Instant::now();
+            let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+            for entry in waiting.1.iter_mut().filter(|entry| entry.pokes < MAX_POKES && entry.poke_at <= now) {
+                // Still registered, and registration is removed under this
+                // lock: the thread is inside its listing and nowhere else.
+                unsafe { libc::pthread_kill(entry.thread, libc::SIGUSR2) };
+                entry.pokes += 1;
+                entry.patience *= 2;
+                entry.poke_at = now + entry.patience;
+            }
+        });
+    }
+
+    pub struct Watched(u64);
+
+    /// Until the returned guard is dropped, this thread is interrupted
+    /// whenever it sits in one system call for too long.
+    pub fn watch() -> Watched {
+        STARTED.call_once(start);
+        let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+        waiting.0 += 1;
+        let id = waiting.0;
+        let thread = unsafe { libc::pthread_self() };
+        waiting.1.push(Waiting { id, thread, poke_at: Instant::now() + FIRST_PATIENCE, patience: FIRST_PATIENCE, pokes: 0 });
+        Watched(id)
+    }
+
+    impl Drop for Watched {
+        fn drop(&mut self) {
+            WAITING.lock().unwrap_or_else(|e| e.into_inner()).1.retain(|entry| entry.id != self.0);
+        }
+    }
+}
+
+/// More than `unstick` ever pokes, so the last tries are left alone.
+const LISTING_RETRIES: usize = 8;
+
+fn in_containers(path: &str) -> bool {
+    path.contains("/Library/Containers") || path.contains("/Library/Group Containers")
+}
+
+/// Any one filesystem call on `path`, retried while it is interrupted. For a
+/// listing, `attempt` must deliver nothing when it fails, so that running it
+/// again cannot report an entry twice.
+fn patiently<T>(path: &str, mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let _watched = in_containers(path).then(unstick::watch);
+    let mut interruptions = 0;
+    loop {
+        match attempt() {
+            Err(err) if err.kind() == io::ErrorKind::Interrupted && interruptions < LISTING_RETRIES => {
+                interruptions += 1;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// The portable listing: entries that cannot be read are left out.
+fn read_dir(dir: &str) -> io::Result<Vec<fs::DirEntry>> {
+    patiently(dir, || fs::read_dir(dir).map(|entries| entries.flatten().collect()))
 }
 
 // --------------------------------------------------------------------- walk
@@ -432,23 +547,25 @@ fn dir_stats(path: &str, own_mtime: i64) -> (u64, i64) {
     fn visit<'s>(scope: &rayon::Scope<'s>, dir: String, size: &'s AtomicU64, newest: &'s AtomicI64) {
         #[cfg(target_os = "macos")]
         {
-            let listed = bulk::list(&dir, |entry| match entry.vtype {
-                bulk::VLNK => {}
-                bulk::VDIR => {
-                    let child = join(&dir, entry.name);
-                    scope.spawn(move |s| visit(s, child, size, newest));
-                }
-                _ => {
-                    size.fetch_add(entry.size, Ordering::Relaxed);
-                    newest.fetch_max(entry.mtime_nanos, Ordering::Relaxed);
-                }
+            let listed = patiently(&dir, || {
+                bulk::list(&dir, |entry| match entry.vtype {
+                    bulk::VLNK => {}
+                    bulk::VDIR => {
+                        let child = join(&dir, entry.name);
+                        scope.spawn(move |s| visit(s, child, size, newest));
+                    }
+                    _ => {
+                        size.fetch_add(entry.size, Ordering::Relaxed);
+                        newest.fetch_max(entry.mtime_nanos, Ordering::Relaxed);
+                    }
+                })
             });
             if listed.is_ok() {
                 return;
             }
         }
-        let Ok(entries) = fs::read_dir(&dir) else { return };
-        for entry in entries.flatten() {
+        let Ok(entries) = read_dir(&dir) else { return };
+        for entry in entries {
             let Ok(file_type) = entry.file_type() else { continue };
             if file_type.is_symlink() {
                 continue;
@@ -472,7 +589,7 @@ fn dir_stats(path: &str, own_mtime: i64) -> (u64, i64) {
 }
 
 fn emit(ctx: &Ctx, walk: &Walk, path: &str, is_dir: bool) {
-    let Ok(meta) = fs::symlink_metadata(path) else { return };
+    let Ok(meta) = patiently(path, || fs::symlink_metadata(path)) else { return };
     let own = mtime_nanos(&meta);
     let (size, newest) = if is_dir { dir_stats(path, own) } else { (meta.len(), own) };
     let mtime = newest.max(own) as f64 / 1e9;
@@ -494,8 +611,8 @@ fn visit<'s>(
     depth: usize,
 ) {
     ctx.tick(active[0], &rel);
-    let listing: io::Result<Vec<fs::DirEntry>> = fs::read_dir(&dir).and_then(|rd| rd.collect());
-    let entries = match listing {
+    let listed: io::Result<Vec<fs::DirEntry>> = patiently(&dir, || fs::read_dir(&dir).and_then(|rd| rd.collect()));
+    let entries = match listed {
         Ok(entries) => entries,
         Err(err) => {
             for walk in &active {
@@ -647,7 +764,7 @@ impl FilesCtx {
 
 fn files_visit<'s>(scope: &rayon::Scope<'s>, ctx: &'s FilesCtx, root: usize, dir: String, resolved: String) {
     // stat, not lstat: only a root can be a symlink, and it is to be followed.
-    let Ok(meta) = fs::metadata(&dir) else { return };
+    let Ok(meta) = patiently(&dir, || fs::metadata(&dir)) else { return };
     let first_visit = ctx.seen_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert((meta.dev(), meta.ino()));
     if !first_visit {
         return;
@@ -662,20 +779,23 @@ fn files_visit<'s>(scope: &rayon::Scope<'s>, ctx: &'s FilesCtx, root: usize, dir
 
     #[cfg(target_os = "macos")]
     {
-        let listed = bulk::list(&dir, |entry| match entry.vtype {
-            bulk::VDIR => descend(entry.name),
-            bulk::VREG => {
-                let found = Found { path: join(&dir, entry.name), root, size: entry.size, mtime_nanos: entry.mtime_nanos };
-                ctx.regular_file(found, entry.dev, entry.ino, entry.nlink);
-            }
-            _ => {} // symlinks are never followed; FIFOs, sockets and devices are not files to compare
+        let listed = patiently(&dir, || {
+            bulk::list(&dir, |entry| match entry.vtype {
+                bulk::VDIR => descend(entry.name),
+                bulk::VREG => {
+                    let found =
+                        Found { path: join(&dir, entry.name), root, size: entry.size, mtime_nanos: entry.mtime_nanos };
+                    ctx.regular_file(found, entry.dev, entry.ino, entry.nlink);
+                }
+                _ => {} // symlinks are never followed; FIFOs, sockets and devices are not files to compare
+            })
         });
         if listed.is_ok() {
             return;
         }
     }
-    let Ok(entries) = fs::read_dir(&dir) else { return };
-    for entry in entries.flatten() {
+    let Ok(entries) = read_dir(&dir) else { return };
+    for entry in entries {
         let Ok(name) = entry.file_name().into_string() else { continue };
         let Ok(file_type) = entry.file_type() else { continue };
         if file_type.is_symlink() {
@@ -1038,6 +1158,60 @@ mod tests {
         assert_eq!((g.static_prefix.as_str(), g.max_depth), ("", None));
         let g = Glob::compile("a/b*/c/**/d").unwrap();
         assert_eq!((g.static_prefix.as_str(), g.max_depth), ("a", None));
+    }
+
+    #[test]
+    fn a_call_that_hangs_is_interrupted() {
+        let mut ends = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        let started = std::time::Instant::now();
+
+        let watched = unstick::watch();
+        let mut byte = 0u8;
+        // Nothing is ever written: left alone, this read never returns.
+        let read = unsafe { libc::read(ends[0], (&mut byte as *mut u8).cast(), 1) };
+        let error = io::Error::last_os_error();
+        drop(watched);
+
+        assert_eq!(read, -1);
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+        unsafe {
+            libc::close(ends[0]);
+            libc::close(ends[1]);
+        }
+    }
+
+    #[test]
+    fn interrupted_calls_are_retried_and_other_failures_are_not() {
+        let mut calls = 0;
+        let outcome = patiently("/anywhere", || {
+            calls += 1;
+            if calls < 4 { Err(io::Error::from(io::ErrorKind::Interrupted)) } else { Ok(calls) }
+        });
+        assert_eq!(outcome.ok(), Some(4));
+
+        let mut calls = 0;
+        let outcome: io::Result<()> = patiently("/anywhere", || {
+            calls += 1;
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!((outcome.map_err(|e| e.kind()), calls), (Err(io::ErrorKind::PermissionDenied), 1));
+
+        let mut calls = 0;
+        let outcome: io::Result<()> = patiently("/anywhere", || {
+            calls += 1;
+            Err(io::Error::from(io::ErrorKind::Interrupted))
+        });
+        assert_eq!((outcome.map_err(|e| e.kind()), calls), (Err(io::ErrorKind::Interrupted), LISTING_RETRIES + 1));
+    }
+
+    #[test]
+    fn only_other_apps_sandboxes_are_watched() {
+        assert!(in_containers("/Users/x/Library/Containers/com.apple.Maps/Data"));
+        assert!(in_containers("/Users/x/Library/Group Containers/group.example"));
+        assert!(!in_containers("/Users/x/Library/Application Support/Code"));
+        assert!(!in_containers("/Volumes/Backup/photos"));
     }
 
     #[test]
