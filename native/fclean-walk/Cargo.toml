@@ -1,6 +1,6 @@
 [package]
 name = "fclean-walk"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 description = "Parallel directory walker for File Cleaner's scan (optional accelerator; the Python scanner is the reference and the fallback)"
 license = "LicenseRef-Proprietary"

@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-09-19
+
+### Fixed
+- `fclean duplicates` and `fclean large-files` could leave out, at random and
+  without saying so, files inside other apps' sandboxes
+  (`~/Library/Containers`, `~/Library/Group Containers`) — whenever they walk
+  in Python, which is when the native helper is not installed or has failed.
+  1.6.1 made the scanner and the helper retry a directory listing that macOS
+  interrupts (`EINTR`, after a hang), but this walk was an `os.walk`, which
+  does the listing itself and swallows its error: there was nothing to
+  retry, and the directory was skipped with everything below it. That could
+  only ever under-report — a duplicate or a large file not mentioned — never
+  report a file that is not there. The walk now lists directories itself,
+  through the same retrying listing as the scanner (now `listing.list_dir`),
+  and is otherwise unchanged: the same files, in the same order, under the
+  same names.
+
 ## [1.7.0] - 2026-09-19
 
 ### Added

@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
-from filecleaner import native_walk, safety
+from filecleaner import listing, native_walk, safety
 
 FileIdentity = tuple[int, int]
 
@@ -97,24 +97,30 @@ def walk_unique_files(
     seen_dirs: set[FileIdentity] = set()
     seen_hard_links: set[FileIdentity] = set()
     for root in roots:
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        # Not os.walk: it would drop, without a word, a directory whose
+        # listing macOS interrupted (see ``listing``).
+        stack = [str(root)]
+        while stack:
+            current = stack.pop()
             try:
                 # stat, not lstat: a root may itself be a symlink to a directory.
-                dir_id = identity(os.stat(dirpath))
+                dir_id = identity(os.stat(current))
+                if dir_id in seen_dirs:
+                    continue
+                entries = listing.list_dir(current)
             except OSError:
-                dirnames[:] = []
-                continue
-            if dir_id in seen_dirs:
-                dirnames[:] = []
                 continue
             seen_dirs.add(dir_id)
 
-            base = Path(dirpath)
-            dirnames[:] = [d for d in dirnames if not safety.is_protected(base / d, extra_protected=extra_protected)]
-            for filename in filenames:
-                file_path = base / filename
+            subdirs: list[str] = []
+            for entry in entries:
                 try:
-                    st = os.lstat(file_path)
+                    # Neither of these follows a symlink, so one is never
+                    # descended into and never passes for a regular file.
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirs.append(entry.path)
+                        continue
+                    st = entry.stat(follow_symlinks=False)
                 except OSError:
                     continue
                 if not stat.S_ISREG(st.st_mode):
@@ -125,4 +131,8 @@ def walk_unique_files(
                         continue
                     seen_hard_links.add(file_id)
                 if st.st_size >= min_size:
-                    yield file_path, FileStat(st.st_size, st.st_mtime)
+                    yield Path(entry.path), FileStat(st.st_size, st.st_mtime)
+            # Pushed in reverse, to be visited in the order they were listed.
+            stack.extend(
+                d for d in reversed(subdirs) if not safety.is_protected(Path(d), extra_protected=extra_protected)
+            )
