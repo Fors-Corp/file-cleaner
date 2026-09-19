@@ -9,15 +9,14 @@ ruled out without ever being fully read.
 from __future__ import annotations
 
 import hashlib
-import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from filecleaner import config as config_mod
-from filecleaner import safety
-from filecleaner.models import DuplicateGroup
+from filecleaner import filewalk, safety
+from filecleaner.models import DuplicateGroup, Skipped
 
 ProgressCallback = Callable[[str], None]
 _PARTIAL_HASH_BYTES = 65536
@@ -52,33 +51,27 @@ def find_duplicates(
     max_groups: int | None = None,
     progress: ProgressCallback | None = None,
 ) -> list[DuplicateGroup]:
+    """Group files whose contents are identical.
+
+    A duplicate is a DIFFERENT physical file with the same bytes. Each
+    physical file is considered once, however many paths lead to it (see
+    ``filewalk``) — so two hard links to one inode are one file, not
+    duplicates: removing one name would free no space.
+    """
     extra_protected = config_mod.extra_protected_paths(config) + config_mod.data_paths_to_protect(config)
     max_hash_bytes = config.get("hash_duplicates_max_bytes", 2_000_000_000)
 
     size_buckets: dict[int, list[Path]] = {}
     files_seen = 0
-    for root in roots:
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            base = Path(dirpath)
-            dirnames[:] = [
-                d for d in dirnames if not safety.is_protected(base / d, extra_protected=extra_protected)
-            ]
-            for filename in filenames:
-                file_path = base / filename
-                try:
-                    if file_path.is_symlink():
-                        continue
-                    size = file_path.stat().st_size
-                except OSError:
-                    continue
-                files_seen += 1
-                if progress is not None and files_seen % _PROGRESS_EVERY_FILES == 0:
-                    progress(f"scanned {files_seen} files, comparing sizes…")
-                if size < min_size_bytes:
-                    continue
-                if safety.is_protected(file_path, extra_protected=extra_protected):
-                    continue
-                size_buckets.setdefault(size, []).append(file_path)
+    for file_path, st in filewalk.walk_unique_files(roots, extra_protected=extra_protected):
+        files_seen += 1
+        if progress is not None and files_seen % _PROGRESS_EVERY_FILES == 0:
+            progress(f"scanned {files_seen} files, comparing sizes…")
+        if st.st_size < min_size_bytes:
+            continue
+        if safety.is_protected(file_path, extra_protected=extra_protected):
+            continue
+        size_buckets.setdefault(st.st_size, []).append(file_path)
 
     max_workers = config.get("scan_concurrency", 4)
 
@@ -126,13 +119,29 @@ def find_duplicates(
 KEEP_STRATEGIES = ("oldest", "newest", "shortest-path")
 
 
-def select_deletions(groups: list[DuplicateGroup], *, keep: str = "oldest") -> list[Path]:
+def _identity_of(path: Path) -> filewalk.FileIdentity | None:
+    try:
+        # stat, not lstat: were one path a symlink to the other, following it
+        # is what exposes the two as a single file.
+        return filewalk.identity(path.stat())
+    except OSError:
+        return None
+
+
+def select_deletions(
+    groups: list[DuplicateGroup], *, keep: str = "oldest"
+) -> tuple[list[Path], list[Skipped]]:
     """For each group, choose one path to keep and return every *other*
     path (across all groups) as the set to delete. Still read-only itself —
-    only ``Path.stat()`` to compare modification times; the actual delete
-    is the caller's job (see ``fclean duplicates --apply``, which quarantines
-    then immediately purges these — full deletion, but still audited and
-    deny-list-checked, never a raw ``unlink``)."""
+    only ``Path.stat()``; the actual delete is the caller's job (see
+    ``fclean duplicates --apply``, which quarantines then immediately purges
+    these — full deletion, but still audited and deny-list-checked, never a
+    raw ``unlink``).
+
+    This is the last check before a permanent delete, so it trusts no one,
+    ``find_duplicates`` included: a path is only offered for deletion once
+    it is proven to be a different physical file from the kept copy.
+    Anything else comes back in the second list, refused, with the reason."""
     if keep not in KEEP_STRATEGIES:
         raise ValueError(f"unknown keep strategy: {keep!r}; expected one of {KEEP_STRATEGIES}")
 
@@ -143,6 +152,7 @@ def select_deletions(groups: list[DuplicateGroup], *, keep: str = "oldest") -> l
             return default
 
     to_delete: list[Path] = []
+    refused: list[Skipped] = []
     for group in groups:
         if keep == "shortest-path":
             keeper = min(group.paths, key=lambda p: len(str(p)))
@@ -150,5 +160,17 @@ def select_deletions(groups: list[DuplicateGroup], *, keep: str = "oldest") -> l
             keeper = max(group.paths, key=lambda p: _mtime(p, default=float("-inf")))
         else:  # oldest
             keeper = min(group.paths, key=lambda p: _mtime(p, default=float("inf")))
-        to_delete.extend(p for p in group.paths if p != keeper)
-    return to_delete
+
+        keeper_id = _identity_of(keeper)
+        for path in group.paths:
+            if path == keeper:
+                continue
+            if keeper_id is None:
+                reason = f"the copy to keep ({keeper}) can no longer be read, so this may be the last one"
+                refused.append(Skipped(path=str(path), reason=reason))
+            elif _identity_of(path) == keeper_id:
+                reason = f"is the same file as the copy to keep ({keeper}) under another name, not a duplicate"
+                refused.append(Skipped(path=str(path), reason=reason))
+            else:
+                to_delete.append(path)
+    return to_delete, refused

@@ -5,6 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-09-19
+
+Fixes a data-loss bug in `fclean duplicates --apply`.
+
+### Security
+- **`fclean duplicates --apply` could permanently delete the only copy of a
+  file.** The finder compared files by path, so one physical file reached
+  under two different paths was hashed against itself, reported as a
+  duplicate group, and all but one "copy" purged — which removed the file
+  itself. This happened whenever the roots given reached the same directory
+  twice under different spellings: a root named in another case
+  (`~/Documents` and `~/documents`) or Unicode normalisation form on a
+  filesystem that ignores both, as APFS does by default, or a root that is a
+  symlink to, or into, another root. Files are now told apart by the
+  filesystem's own identity for them (`st_dev`, `st_ino`) rather than by
+  path, so no spelling of a path can make one file look like two.
+- Defence in depth on the delete itself: `--apply` now refuses to remove any
+  path that is the same physical file as the copy being kept, and refuses a
+  whole group if the copy to keep can no longer be read (`--keep
+  shortest-path` could previously "keep" a file that had vanished since the
+  scan and delete the last real one). Refusals are reported under `skipped`
+  with the reason, never silently dropped.
+
+### Fixed
+- Overlapping roots (`fclean duplicates ~/Documents ~/Documents/sub`)
+  reported every file in the overlap as a duplicate of itself, inflating
+  "wasted space". Nothing was deleted in this one case, only misreported.
+- Hard links are no longer reported as duplicates. Two names for one inode
+  are one file: removing one frees no space, so it was never reclaimable.
+  A hard-linked file that also has a genuine copy elsewhere is still
+  reported, once.
+- `fclean large-files` listed a file once per path that reached it, so
+  overlapping or aliased roots and hard links double-counted disk usage.
+- Overlapping or aliased roots are no longer walked twice.
+- `fclean duplicates` now ignores FIFOs, sockets and device nodes rather
+  than trying to hash them (`--min-size 0` could block forever on a FIFO).
+
+### Changed
+- `duplicates.select_deletions()` returns `(to_delete, refused)` instead of
+  a bare list, so the caller can report what was refused and why.
+- New internal module `filewalk`: the single place that walks a set of roots
+  visiting each physical file exactly once. `duplicates` and `large-files`
+  both use it instead of each carrying their own `os.walk` loop.
+
 ## [1.5.1] - 2026-09-19
 
 ### Fixed

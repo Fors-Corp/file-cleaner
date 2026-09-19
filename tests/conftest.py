@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,37 @@ def sandbox_config(tmp_path, sandbox_home):
     cfg = config_mod.default_config()
     cfg["quarantine_dir"] = str(tmp_path / "quarantine")
     return cfg
+
+
+@pytest.fixture(
+    params=["overlapping-roots", "case-variant-root", "symlinked-root", "unicode-variant-root", "hard-link"]
+)
+def one_file_reached_twice(request, sandbox_home) -> tuple[list[Path], Path]:
+    """ONE physical file that the returned roots reach twice, once per way
+    that can happen. Returns ``(roots, real_file)``. Scenarios the host
+    filesystem can't express (case- or normalisation-sensitive) are skipped."""
+    scenario = request.param
+    name = "Café" if scenario == "unicode-variant-root" else "Stuff"
+    top = sandbox_home / name
+    real = top / "sub" / "only.bin"
+    real.parent.mkdir(parents=True)
+    real.write_bytes(b"only copy " * 500)
+
+    if scenario == "overlapping-roots":
+        return [top, top / "sub"], real
+    if scenario == "symlinked-root":
+        link = sandbox_home / "link"
+        link.symlink_to(top, target_is_directory=True)
+        return [top, link], real
+    if scenario == "hard-link":
+        os.link(real, top / "hard.bin")
+        return [top], real
+
+    respelled = name.swapcase() if scenario == "case-variant-root" else unicodedata.normalize("NFD", name)
+    alias = sandbox_home / respelled
+    if not alias.exists():
+        pytest.skip(f"filesystem tells {name!r} and {respelled!r} apart, so they are not aliases here")
+    return [top, alias], real
 
 
 def _age_path(path: Path, days: float) -> None:
