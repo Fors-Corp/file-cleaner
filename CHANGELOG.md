@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Internal
+- First phase of the Rust port (`docs/PORT.md`). `fclean-walk` now carries a
+  full port of the deny-list (`safety.rs`: symlink resolution, deny index,
+  `is_protected`) and a `scan` mode that does the whole scan natively —
+  walk, protection re-check, thresholds, overlap coalescing. Nothing `fclean`
+  runs uses either yet: Python remains the authority, and these exist to be
+  proven equal to it first. They are: 370/370 conformance cases, 0
+  differences over 338,555 real paths, and an identical 374-candidate scan
+  of a real home directory (`tools/port_parity.py`,
+  `tests/test_port_parity.py`).
+
 ## [1.6.0] - 2026-09-19
 
 ### Added
