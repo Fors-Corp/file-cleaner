@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "filecleaner"
-version = "1.6.0"
+version = "1.7.0"
 description = "Local-only, privacy-preserving macOS disk cleanup tool with a quarantine-based safety net"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -46,14 +46,17 @@ dev = [
 device = ["pymobiledevice3>=4.0"]
 
 [project.urls]
-Repository = "https://github.com/marcfs31/file-cleaner"
-Changelog = "https://github.com/marcfs31/file-cleaner/blob/main/CHANGELOG.md"
+Repository = "https://github.com/Fors-Corp/file-cleaner"
+Changelog = "https://github.com/Fors-Corp/file-cleaner/blob/main/CHANGELOG.md"
 
 [project.scripts]
 fclean = "filecleaner.cli:_entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+filecleaner = ["builtin_rules.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

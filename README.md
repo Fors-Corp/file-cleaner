@@ -1,6 +1,6 @@
 # File Cleaner
 
-[![CI](https://github.com/marcfs31/file-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/marcfs31/file-cleaner/actions/workflows/ci.yml)
+[![CI](https://github.com/Fors-Corp/file-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/Fors-Corp/file-cleaner/actions/workflows/ci.yml)
 ![SemVer](https://img.shields.io/badge/versioning-SemVer-blue)
 ![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-lightgrey)
 

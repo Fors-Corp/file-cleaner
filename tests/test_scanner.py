@@ -385,6 +385,62 @@ class TestProtectedPathsDuringWalk:
         assert [c.path for c in result.candidates] == [box / "alias" / "Library" / "Logs" / "app.emlx"]
 
 
+class TestInterruptedListings:
+    """macOS now and then fails the opening of a directory inside another
+    app's sandbox with EINTR, after a hang; asked again it answers at once.
+    An interrupted listing is retried, not reported as an unreadable folder."""
+
+    @staticmethod
+    def _interrupting(monkeypatch, times, only=None):
+        real, failures = scanner.os.scandir, {}
+
+        def scandir(path):
+            if only is None or str(path).endswith(only):
+                failures[str(path)] = failures.get(str(path), 0) + 1
+                if failures[str(path)] <= times:
+                    raise InterruptedError(4, "Interrupted system call")
+            return real(path)
+
+        monkeypatch.setattr(scanner.os, "scandir", scandir)
+        return failures
+
+    def test_the_scan_reads_a_directory_that_was_interrupted(self, sandbox_config, sandbox_home, monkeypatch):
+        monkeypatch.setenv("FCLEAN_NATIVE_WALK", "0")
+        (sandbox_home / "box" / "inner").mkdir(parents=True)
+        (sandbox_home / "box" / "inner" / "app.log").write_bytes(b"x" * 10)
+        sandbox_config["rules"] = [{"id": "anylog", "include": ["**/*.log"], "min_age_days": 0}]
+        self._interrupting(monkeypatch, times=3, only="/inner")
+
+        result = scanner.run_scan(sandbox_config, only_rules={"anylog"}, include_disabled=True, root=sandbox_home)
+
+        assert [c.path.name for c in result.candidates] == ["app.log"]
+        assert result.errors == []
+
+    def test_a_directory_that_is_always_interrupted_is_reported_not_hung_on(
+        self, sandbox_config, sandbox_home, monkeypatch
+    ):
+        monkeypatch.setenv("FCLEAN_NATIVE_WALK", "0")
+        (sandbox_home / "box" / "inner").mkdir(parents=True)
+        (sandbox_home / "box" / "inner" / "app.log").write_bytes(b"x" * 10)
+        sandbox_config["rules"] = [{"id": "anylog", "include": ["**/*.log"], "min_age_days": 0}]
+        failures = self._interrupting(monkeypatch, times=10**6, only="/inner")
+
+        result = scanner.run_scan(sandbox_config, only_rules={"anylog"}, include_disabled=True, root=sandbox_home)
+
+        assert result.candidates == []
+        assert len(result.errors) == 1 and "Interrupted system call" in result.errors[0]
+        assert max(failures.values()) == scanner._LISTING_RETRIES + 1
+
+    def test_sizing_a_folder_survives_an_interruption(self, sandbox_home, monkeypatch):
+        (sandbox_home / "box" / "inner").mkdir(parents=True)
+        (sandbox_home / "box" / "inner" / "data.bin").write_bytes(b"x" * 321)
+        expected = scanner.dir_stats(sandbox_home / "box")
+        self._interrupting(monkeypatch, times=2)
+
+        assert scanner.dir_stats(sandbox_home / "box") == expected
+        assert expected[0] == 321
+
+
 class TestProgress:
     @staticmethod
     def _scan(tmp_path, sandbox_config, monkeypatch, **kwargs):

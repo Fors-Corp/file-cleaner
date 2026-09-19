@@ -5,7 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] - 2026-09-19
+
+### Added
+- `fclean leftovers` sizes the folders it finds with the native helper (when
+  it is installed): all of them in one batch, across every core, through
+  `getattrlistbulk`. Sizing was 98% of the command's time — 1,037 folders,
+  one `lstat` per file, on one core. On a real home directory: 7.5 s
+  (anywhere from 2.3 to 14.8 s) down to 1.0 s (0.9 to 1.5 s), same 664
+  candidates and sizes. As everywhere else, the helper is optional, its
+  answer is checked (exactly one sane answer per folder, or it is thrown
+  away), and the check made before `apply` still sizes folders in Python.
+  `organize` and the installer clean-up were measured too and left alone:
+  they list a single folder and take 0.02 s.
+
+### Changed
+- The builtin rules live in a data file, `builtin_rules.json`, instead of in
+  Python source, so that the Rust port compiles in the very same list. The
+  rules themselves are unchanged (the loaded objects are identical), and the
+  file ships in the wheel.
+
+### Internal
+- Second phase of the Rust port (`docs/PORT.md`): `fclean-walk scan-json` and
+  `config-json` read the config file, the rules and the volumes themselves and
+  print what `fclean scan --json` and `fclean config show --json` print —
+  byte for byte on a real home directory (99,091 bytes) and across a matrix
+  of configs in CI. Still nothing `fclean` runs uses them.
+
+## [1.6.1] - 2026-09-19
+
+### Fixed
+- Folders inside other apps' sandboxes (`~/Library/Containers`,
+  `~/Library/Group Containers`) could be skipped, or reported as unreadable,
+  at random. macOS checks every directory opened there, and now and then
+  that check hangs for five or six seconds and then fails the open with
+  `EINTR` — about once per pass on one core, dozens of times with every core
+  asking at once, which made walking those folders in parallel slower than
+  walking them on one core (12 s against 1.7 s). Asking again succeeds
+  within a millisecond. An interrupted listing is now retried, in the Python
+  scanner and in the helper, and inside those two places the helper
+  interrupts a call that has not returned in a quarter of a second instead
+  of waiting out the hang (`~/Library/Containers`: 12.0 s to about 1 s; all
+  of `~/Library`: 6.7–12.8 s to about 2 s, with the same folders listed on
+  every run). A whole-home scan takes as long as before: its time goes
+  elsewhere.
 
 ### Internal
 - First phase of the Rust port (`docs/PORT.md`). `fclean-walk` now carries a

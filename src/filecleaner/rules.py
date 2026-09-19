@@ -12,6 +12,8 @@ two rules match the same path the more descriptive label wins.
 from __future__ import annotations
 
 import dataclasses
+import json
+from importlib import resources
 from typing import Any
 
 from filecleaner.models import Rule
@@ -21,279 +23,37 @@ class RuleError(Exception):
     """A custom rule in the config file is invalid."""
 
 
-BUILTIN_RULES: tuple[Rule, ...] = (
-    # ----- Logs ------------------------------------------------------------
-    Rule(
-        id="crash_reports",
-        label="Crash & diagnostic reports",
-        category="Logs",
-        description="~/Library/Logs/DiagnosticReports — crash logs",
-        enabled_by_default=True,
-        risk="low",
-        kind="file",
-        scope="home",
-        include_globs=("Library/Logs/DiagnosticReports/**/*",),
-        min_age_days=0,
-    ),
-    Rule(
-        id="logs",
-        label="User logs",
-        category="Logs",
-        description="~/Library/Logs — application log files older than a week",
-        enabled_by_default=True,
-        risk="low",
-        kind="file",
-        scope="home",
-        include_globs=("Library/Logs/**/*",),
-        min_age_days=7,
-    ),
-    # ----- Caches ----------------------------------------------------------
-    Rule(
-        id="browser_caches",
-        label="Browser caches",
-        category="Caches",
-        description="Safari / Chrome / Firefox / Edge on-disk HTTP caches",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=(
-            "Library/Caches/com.apple.Safari/*",
-            "Library/Caches/Google/Chrome/*",
-            "Library/Application Support/Google/Chrome/*/Cache",
-            "Library/Application Support/Google/Chrome/*/Code Cache",
-            "Library/Caches/Firefox/*",
-            "Library/Application Support/Firefox/Profiles/*/cache2",
-            "Library/Caches/com.microsoft.edgemac/*",
-        ),
-        min_age_days=1,
-    ),
-    Rule(
-        id="system_caches",
-        label="Application caches",
-        category="Caches",
-        description="~/Library/Caches/* — regenerable per-app caches untouched for 3 days",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=("Library/Caches/*",),
-        min_age_days=3,
-    ),
-    # ----- Trash -----------------------------------------------------------
-    Rule(
-        id="trash",
-        label="Trash",
-        category="Trash",
-        description="~/.Trash — files you already deleted",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=(".Trash/*",),
-        min_age_days=0,
-    ),
-    Rule(
-        id="external_trash",
-        label="External drive Trash",
-        category="Trash",
-        description="Per-user Trash folders on external/removable volumes",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="each_volume",
-        include_globs=(".Trashes/*",),
-        min_age_days=0,
-    ),
-    # ----- System junk -----------------------------------------------------
-    Rule(
-        id="ds_store",
-        label=".DS_Store files",
-        category="System junk",
-        description="Finder metadata files scattered across the home directory",
-        enabled_by_default=True,
-        risk="low",
-        kind="file",
-        scope="home",
-        include_globs=("**/.DS_Store",),
-        exclude_globs=("Library/**",),
-        min_age_days=0,
-    ),
-    # ----- Developer -------------------------------------------------------
-    Rule(
-        id="dev_xcode",
-        label="Xcode DerivedData",
-        category="Developer",
-        description="~/Library/Developer/Xcode/DerivedData — fully regenerated on next build",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=("Library/Developer/Xcode/DerivedData/*",),
-        min_age_days=3,
-    ),
-    Rule(
-        id="dev_xcode_device_support",
-        label="Xcode iOS DeviceSupport",
-        category="Developer",
-        description="~/Library/Developer/Xcode/iOS DeviceSupport — debug symbols per iOS version, "
-        "re-downloaded automatically when that device is next connected",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=("Library/Developer/Xcode/iOS DeviceSupport/*",),
-        min_age_days=30,
-    ),
-    Rule(
-        id="dev_simulator_caches",
-        label="iOS Simulator caches",
-        category="Developer",
-        description="~/Library/Developer/CoreSimulator/Caches — simulator runtime caches",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=("Library/Developer/CoreSimulator/Caches/*",),
-        min_age_days=7,
-    ),
-    Rule(
-        id="dev_xcode_archives",
-        label="Xcode Archives (opt-in)",
-        category="Developer (opt-in)",
-        description="~/Library/Developer/Xcode/Archives — app archives you may still need for "
-        "symbolicating crash reports of shipped builds",
-        enabled_by_default=False,
-        risk="medium",
-        kind="dir",
-        scope="home",
-        include_globs=("Library/Developer/Xcode/Archives/*",),
-        min_age_days=90,
-    ),
-    Rule(
-        id="dev_npm_cache",
-        label="npm/yarn/pnpm package caches",
-        category="Developer",
-        description="Global JS package manager caches — re-downloadable",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=(
-            ".npm/_cacache/*",
-            "Library/Caches/Yarn/*",
-            "Library/pnpm/store/*",
-            ".cache/yarn/*",
-        ),
-        min_age_days=3,
-    ),
-    Rule(
-        id="dev_pip_cache",
-        label="pip / uv package caches",
-        category="Developer",
-        description="Python package manager caches — re-downloadable",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=(
-            "Library/Caches/pip/*",
-            "Library/Caches/uv/*",
-            ".cache/pip/*",
-            ".cache/uv/*",
-        ),
-        min_age_days=3,
-    ),
-    Rule(
-        id="dev_homebrew_cache",
-        label="Homebrew download cache",
-        category="Developer",
-        description="~/Library/Caches/Homebrew — downloaded bottles/archives, kept after install",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=("Library/Caches/Homebrew/*",),
-        min_age_days=3,
-    ),
-    Rule(
-        id="dev_gradle_cache",
-        label="Gradle caches",
-        category="Developer",
-        description="~/.gradle/caches — re-downloadable build dependencies",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=(".gradle/caches/*",),
-        min_age_days=14,
-    ),
-    Rule(
-        id="dev_cargo_cache",
-        label="Cargo registry cache",
-        category="Developer",
-        description="~/.cargo/registry/cache — downloaded crate archives, re-fetched on demand",
-        enabled_by_default=True,
-        risk="low",
-        kind="dir",
-        scope="home",
-        include_globs=(".cargo/registry/cache/*",),
-        min_age_days=14,
-    ),
-    Rule(
-        id="dev_docker_reclaimable",
-        label="Docker Desktop logs (opt-in)",
-        category="Developer (opt-in)",
-        description="Docker Desktop log data under Library/Containers — NOT images/volumes "
-        "(use `docker system prune` for those, since they need Docker's own bookkeeping)",
-        enabled_by_default=False,
-        risk="medium",
-        kind="dir",
-        scope="home",
-        include_globs=("Library/Containers/com.docker.docker/Data/log/*",),
-        min_age_days=7,
-    ),
-    Rule(
-        id="dev_node_modules",
-        label="Old node_modules directories (opt-in)",
-        category="Developer (opt-in)",
-        description="node_modules folders not modified in 30 days — regenerable via package "
-        "manager install, but off by default since a project might still be in active use",
-        enabled_by_default=False,
-        risk="medium",
-        kind="dir",
-        scope="home",
-        include_globs=("**/node_modules",),
-        exclude_globs=("Library/**",),
-        min_age_days=30,
-    ),
-    # ----- Personal (opt-in) ----------------------------------------------
-    Rule(
-        id="mail_downloads",
-        label="Mail attachment downloads (opt-in)",
-        category="Personal (opt-in)",
-        description="Copies of attachments opened from Apple Mail — the originals stay in the message",
-        enabled_by_default=False,
-        risk="medium",
-        kind="file",
-        scope="home",
-        include_globs=("Library/Containers/com.apple.mail/Data/Library/Mail Downloads/**/*",),
-        min_age_days=30,
-    ),
-    Rule(
-        id="old_downloads",
-        label="Old files in Downloads (opt-in)",
-        category="Personal (opt-in)",
-        description="Files in ~/Downloads untouched for 90 days — off by default, these are "
-        "personal files, not junk",
-        enabled_by_default=False,
-        risk="medium",
-        kind="file",
-        scope="home",
-        include_globs=("Downloads/*",),
-        min_age_days=90,
-    ),
+_BUILTIN_RULE_FIELDS = (
+    "id",
+    "label",
+    "category",
+    "description",
+    "enabled_by_default",
+    "risk",
+    "kind",
+    "scope",
+    "include_globs",
+    "exclude_globs",
+    "min_age_days",
+    "min_size_bytes",
 )
+
+
+def _load_builtin_rules() -> tuple[Rule, ...]:
+    """The builtin rules live in ``builtin_rules.json`` rather than in code so
+    that the Rust port compiles in the very same definitions: one list, two
+    readers. Every field is spelled out for every rule — no defaults to drift."""
+    document = json.loads(resources.files("filecleaner").joinpath("builtin_rules.json").read_text(encoding="utf-8"))
+    loaded = []
+    for entry in document["rules"]:
+        if tuple(entry) != _BUILTIN_RULE_FIELDS:
+            raise ValueError(f"builtin rule {entry.get('id')!r}: expected exactly the fields {_BUILTIN_RULE_FIELDS}")
+        globs = {key: tuple(entry[key]) for key in ("include_globs", "exclude_globs")}
+        loaded.append(Rule(**{**entry, **globs}))
+    return tuple(loaded)
+
+
+BUILTIN_RULES: tuple[Rule, ...] = _load_builtin_rules()
 
 for _rule in BUILTIN_RULES:
     _rule.validate()

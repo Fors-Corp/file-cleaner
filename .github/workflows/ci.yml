@@ -56,7 +56,7 @@ jobs:
         run: >
           FCLEAN_NATIVE_WALK="$PWD/native/fclean-walk/target/release/fclean-walk"
           pytest --no-cov tests/test_scanner.py tests/test_native_walk.py tests/test_tui.py tests/test_cli.py tests/test_port_parity.py
-          tests/test_duplicates.py tests/test_largefiles.py
+          tests/test_duplicates.py tests/test_largefiles.py tests/test_leftovers.py
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'

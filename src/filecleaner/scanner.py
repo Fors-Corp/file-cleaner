@@ -30,7 +30,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +45,7 @@ from filecleaner.volumes import default_scan_roots
 ProgressCallback = Callable[[str, float | None], None]
 
 _MAX_ERRORS = 200
+_LISTING_RETRIES = 8
 _PROGRESS_EVERY_DIRS = 250
 _NEVER_DESCEND = frozenset({".git"})
 _WILDCARDS = ("*", "?", "[")
@@ -157,23 +158,36 @@ def dir_stats(path: Path) -> tuple[int, float]:
     while stack:
         current = stack.pop()
         try:
-            with os.scandir(current) as it:
-                for entry in it:
-                    try:
-                        if entry.is_symlink():
-                            continue
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
-                            continue
-                        st = entry.stat(follow_symlinks=False)
-                    except OSError:
-                        continue
-                    total += st.st_size
-                    if st.st_mtime > newest:
-                        newest = st.st_mtime
+            entries = _list_dir(current)
         except OSError:
             continue
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            total += st.st_size
+            if st.st_mtime > newest:
+                newest = st.st_mtime
     return total, newest
+
+
+def dir_stats_many(paths: Sequence[Path]) -> list[tuple[int, float]]:
+    """``dir_stats`` for each of ``paths``, in order. Sizing many folders is
+    latency-bound and single-core in Python, so the native helper does it in
+    parallel when there is one; its numbers are the same ``dir_stats`` would
+    give. Not for ``plan.revalidate``: the check before ``apply`` stays in
+    Python, one directory at a time."""
+    if len(paths) > 1:
+        sized = native_walk.dir_sizes([str(path) for path in paths])
+        if sized is not None:
+            return sized
+    return [dir_stats(path) for path in paths]
 
 
 @dataclass
@@ -249,9 +263,20 @@ def _report_walking(progress: ProgressCallback, rule: Rule, rel: str, counter: _
     progress(message, percent)
 
 
-def _iter_dir(path: str) -> Iterator[os.DirEntry[str]]:
+def _list_dir(path: str) -> list[os.DirEntry[str]]:
+    """Every entry of ``path``. Inside another app's sandbox
+    (``~/Library/Containers``) macOS now and then hangs the opening of a
+    directory for several seconds and then fails it with EINTR; asked again
+    it answers at once. So an interrupted listing is retried — reporting it
+    would call a readable directory unreadable and leave it unscanned."""
+    for _ in range(_LISTING_RETRIES):
+        try:
+            with os.scandir(path) as it:
+                return list(it)
+        except InterruptedError:
+            continue
     with os.scandir(path) as it:
-        yield from it
+        return list(it)
 
 
 def _walk_rule_pattern(ctx: _WalkContext) -> None:
@@ -283,7 +308,7 @@ def _walk_rule_pattern(ctx: _WalkContext) -> None:
         dir_path, resolved_dir, dir_rel, depth = stack.pop()
         ctx.tick(dir_rel)
         try:
-            entries = list(_iter_dir(dir_path))
+            entries = _list_dir(dir_path)
         except OSError as exc:
             ctx.record_error(f"{ctx.rule.id}: cannot read {dir_path}: {exc.strerror or exc}")
             continue

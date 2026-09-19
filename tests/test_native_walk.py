@@ -260,6 +260,55 @@ class TestUntrustedFileWalk:
             assert sorted(filewalk.walk_unique_files([sandbox_home])) == expected
 
 
+class TestUntrustedDirSizes:
+    """``sizes`` mode: the helper sizes folders for ``leftovers``. An answer
+    that is not exactly one sane line per folder asked about is thrown away."""
+
+    @staticmethod
+    def _folders(home: Path) -> list[Path]:
+        _tree(home)
+        return [home / "projects", home / "top", home / "café [1]"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "sys.exit(3)",
+            "print('not json')",
+            'print(json.dumps({"i": 0, "s": 1, "t": 1.0})); print(json.dumps({"done": 3}))',  # two folders missing
+            _emit_lines([{"i": i, "s": 1, "t": 1.0} for i in (0, 1, 1, 2)] + [{"done": 3}]),  # one answered twice
+            _emit_lines([{"i": i, "s": 1, "t": 1.0} for i in (0, 1, 7)] + [{"done": 3}]),  # one never asked about
+            _emit_lines([{"i": 0, "s": -5, "t": 1.0}, {"i": 1, "s": 1, "t": 1.0}, {"i": 2, "s": 1, "t": 1.0}, {"done": 3}]),
+            _emit_lines([{"i": 0, "s": 1, "t": -1.0}, {"i": 1, "s": 1, "t": 1.0}, {"i": 2, "s": 1, "t": 1.0}, {"done": 3}]),
+        ],
+    )
+    def test_a_broken_helper_falls_back_to_python(self, sandbox_home, tmp_path, monkeypatch, body):
+        folders = self._folders(sandbox_home)
+        expected = [scanner.dir_stats(folder) for folder in folders]
+        assert expected[0][0] == 1012  # a.bin + b.bin + build.log + .git/never.log: sizing skips nothing
+
+        monkeypatch.setenv(native_walk.HELPER_ENV, str(_fake_helper(tmp_path, body)))
+        with pytest.warns(RuntimeWarning, match="falling back to the Python walker"):
+            assert scanner.dir_stats_many(folders) == expected
+
+    def test_no_helper_means_no_warning(self, sandbox_home, monkeypatch):
+        folders = self._folders(sandbox_home)
+        monkeypatch.setenv(native_walk.HELPER_ENV, "0")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert scanner.dir_stats_many(folders) == [scanner.dir_stats(folder) for folder in folders]
+
+    def test_the_check_before_apply_never_asks_the_helper(self, sandbox_home, tmp_path, monkeypatch):
+        """``plan.revalidate`` sizes a folder to decide whether it changed
+        since the plan was saved. That stays in Python."""
+        from filecleaner import plan
+
+        assert "dir_stats_many" not in Path(plan.__file__).read_text()
+        monkeypatch.setenv(native_walk.HELPER_ENV, str(_fake_helper(tmp_path, "sys.exit(3)")))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # a single folder is never worth a helper round-trip either
+            assert scanner.dir_stats_many(self._folders(sandbox_home)[:1])
+
+
 # --------------------------------------------------------------------------
 # The real helper against the reference implementation
 # --------------------------------------------------------------------------
@@ -320,6 +369,64 @@ class TestAgainstThePythonWalker:
 
         assert sorted(native.errors) == sorted(reference.errors)
         assert any("Permission denied" in e for e in native.errors)
+
+    def test_dir_sizes_match_dir_stats(self, sandbox_home, monkeypatch):
+        _tree(sandbox_home)
+        (sandbox_home / "empty").mkdir()
+        locked = sandbox_home / "projects" / "locked"
+        locked.mkdir()
+        (locked / "hidden.bin").write_bytes(b"h" * 50)
+        folders = [
+            sandbox_home / "projects",  # nested, holds a folder that cannot be read
+            sandbox_home / "linked",  # a symlink to a folder: sized as the link, not what it points at
+            sandbox_home / "empty",
+            sandbox_home / "gone",  # does not exist
+            sandbox_home / "café [1]",
+            sandbox_home,  # holds the symlink, which must not be followed or counted twice
+        ]
+        locked.chmod(0)
+        try:
+            monkeypatch.setenv(native_walk.HELPER_ENV, "0")
+            reference = scanner.dir_stats_many(folders)
+            monkeypatch.setenv(native_walk.HELPER_ENV, str(_HELPER))
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                native = scanner.dir_stats_many(folders)
+        finally:
+            locked.chmod(0o700)
+
+        assert [size for size, _ in native] == [size for size, _ in reference]
+        assert all(abs(n - r) < 1e-3 for (_, n), (_, r) in zip(native, reference, strict=True))
+        assert reference[0][0] == 1012 + 0 and reference[3] == (0, 0.0)  # hidden.bin is unreadable to both
+
+    def test_leftovers_agree_across_walkers(self, sandbox_config, sandbox_home, tmp_path, monkeypatch, age_path):
+        from filecleaner import leftovers
+
+        monkeypatch.setattr(leftovers, "_APPLICATIONS_DIRS", (tmp_path / "Applications",))
+        for index, name in enumerate(["com.example.gone", "OldTool", "StillFresh"]):
+            folder = sandbox_home / "Library" / "Application Support" / name
+            (folder / "deep" / "er").mkdir(parents=True)
+            (folder / "deep" / "er" / "data.bin").write_bytes(b"d" * (100 * (index + 1)))
+            if name != "StillFresh":
+                for path in (folder / "deep" / "er" / "data.bin", folder / "deep" / "er", folder / "deep", folder):
+                    age_path(path, days=90)
+        (sandbox_home / "Library" / "Caches").mkdir()
+        (sandbox_home / "Library" / "Caches" / "loose-file.cache").write_bytes(b"c" * 7)
+        age_path(sandbox_home / "Library" / "Caches" / "loose-file.cache", days=90)
+
+        def found() -> list[tuple[str, int, bool]]:
+            hits = leftovers.find_app_leftovers(sandbox_config, home=sandbox_home, min_age_days=30)
+            return [(c.path.name, c.size_bytes, c.is_dir) for c in hits]
+
+        monkeypatch.setenv(native_walk.HELPER_ENV, "0")
+        reference = found()
+        monkeypatch.setenv(native_walk.HELPER_ENV, str(_HELPER))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            native = found()
+
+        assert native == reference
+        assert sorted(reference) == [("OldTool", 200, True), ("com.example.gone", 100, True), ("loose-file.cache", 7, False)]
 
     def test_comparison_key_matches_safety_key(self):
         """The helper prunes with the same canonical key the deny-list uses.

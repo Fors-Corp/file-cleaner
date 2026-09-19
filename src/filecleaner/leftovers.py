@@ -21,6 +21,7 @@ touches the filesystem.
 
 from __future__ import annotations
 
+import os
 import plistlib
 import time
 from pathlib import Path
@@ -29,7 +30,7 @@ from typing import Any
 from filecleaner import config as config_mod
 from filecleaner import safety
 from filecleaner.models import Candidate
-from filecleaner.scanner import dir_stats
+from filecleaner.scanner import dir_stats_many
 
 _LIBRARY_SUBDIRS = (
     "Application Support",
@@ -89,8 +90,8 @@ def find_app_leftovers(
     bundle_ids, names = installed_apps()
     extra_protected = config_mod.extra_protected_paths(config) + config_mod.data_paths_to_protect(config)
     now = time.time()
-    candidates: list[Candidate] = []
 
+    orphans: list[tuple[Path, os.stat_result, bool]] = []
     for subdir_name in _LIBRARY_SUBDIRS:
         base = home / "Library" / subdir_name
         try:
@@ -106,26 +107,32 @@ def find_app_leftovers(
                 st = entry.lstat()
             except OSError:
                 continue
-            if entry.is_dir():
-                size, newest = dir_stats(entry)
-                mtime = max(st.st_mtime, newest)
-            else:
-                size, mtime = st.st_size, st.st_mtime
-            if (now - mtime) / 86400 < min_age_days:
-                continue
-            candidates.append(
-                Candidate(
-                    path=entry,
-                    size_bytes=size,
-                    is_dir=entry.is_dir(),
-                    mtime=mtime,
-                    rule_id="app_leftovers",
-                    category=_APP_LEFTOVERS_CATEGORY,
-                    risk="high",
-                )
-            )
-    return candidates
+            orphans.append((entry, st, entry.is_dir()))
 
+    # Sizing the folders is nearly all of the work (a thousand of them, some
+    # huge), so it is done in one batch that the native helper can spread out.
+    sized = iter(dir_stats_many([entry for entry, _st, is_dir in orphans if is_dir]))
+    candidates: list[Candidate] = []
+    for entry, st, is_dir in orphans:
+        if is_dir:
+            size, newest = next(sized)
+            mtime = max(st.st_mtime, newest)
+        else:
+            size, mtime = st.st_size, st.st_mtime
+        if (now - mtime) / 86400 < min_age_days:
+            continue
+        candidates.append(
+            Candidate(
+                path=entry,
+                size_bytes=size,
+                is_dir=is_dir,
+                mtime=mtime,
+                rule_id="app_leftovers",
+                category=_APP_LEFTOVERS_CATEGORY,
+                risk="high",
+            )
+        )
+    return candidates
 
 def find_installer_cleanup(config: dict[str, Any], *, downloads: Path | None = None) -> list[Candidate]:
     """``.dmg``/``.pkg``/``.zip`` files in Downloads whose apparent product

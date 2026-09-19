@@ -1,6 +1,6 @@
 [package]
 name = "fclean-walk"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 description = "Parallel directory walker for File Cleaner's scan (optional accelerator; the Python scanner is the reference and the fallback)"
 license = "LicenseRef-Proprietary"
@@ -13,6 +13,7 @@ rayon = "1.10"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = { version = "0.8", features = ["preserve_order"] }
 unicode-normalization = "0.1"
 
 [profile.release]
