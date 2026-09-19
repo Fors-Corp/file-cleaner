@@ -200,9 +200,13 @@ fallback to it is an error in the gate.
 - **`sorted(paths)` is not `sorted(strings)`.** A `Path` compares part by
   part, so `/r/a/b` sorts before `/r/a-c/b` although `-` sorts before `/`.
   The order of a duplicate group's paths (`pypath::path_cmp`).
-- **`suffix` and `stem`** are `posixpath.splitext` since Python 3.14: `.app`
-  and `..app` have no suffix, `Foo.` has `.` (`pypath::splitext`). The port
-  follows the Python it is compared with.
+- **`suffix` and `stem` depend on the Python.** Since 3.14 they are
+  `posixpath.splitext`: `.app` and `..app` have no suffix, `Foo.` has `.`.
+  Before it, `..zip` had the suffix `.zip` and the stem `.` — and
+  `leftovers` then called it "already extracted", `Downloads/.` being a
+  folder — and `Foo.` had none. A port can follow only one: the newest
+  (`pypath::splitext`). The two differ only for names whose only dots lead or
+  trail; CI runs 3.11–3.13, so the test for those names runs on 3.14 alone.
 - **A plan file is `json.dumps(..., indent=2)`**, with `ensure_ascii` left on:
   `Café`, surrogate pairs beyond U+FFFF, and DEL escaped — unlike every
   `--json` report (`pyjson::dumps_ascii`).

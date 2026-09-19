@@ -28,6 +28,7 @@ import plistlib
 import re
 import shutil
 import stat
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -422,7 +423,7 @@ def _make_app(apps_dir: Path, name: str, bundle_id: str | None, fmt=plistlib.FMT
         (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_id}, fmt=fmt))
 
 
-def _leftovers_world(home: Path, apps_dir: Path, *, lone_folder: bool = False) -> None:
+def _leftovers_world(home: Path, apps_dir: Path, *, lone_folder: bool = False, extra_downloads: tuple[str, ...] = ()) -> None:
     _make_app(apps_dir, "Kept", "com.example.kept")
     _make_app(apps_dir, "Binary", "org.binary.app", plistlib.FMT_BINARY)
     _make_app(apps_dir, "NoPlist", None)
@@ -448,7 +449,7 @@ def _leftovers_world(home: Path, apps_dir: Path, *, lone_folder: bool = False) -
     (prefs / "linked.plist").symlink_to(prefs / "com.vanished.tool.plist")
     downloads = home / "Downloads"
     downloads.mkdir()
-    for name in ["Kept.dmg", "app.PKG", "Extracted.ZIP", "Unrelated.zip", "Kept.txt", "..zip"]:
+    for name in ["Kept.dmg", "app.PKG", "Extracted.ZIP", "Unrelated.zip", "Kept.txt", *extra_downloads]:
         (downloads / name).write_bytes(b"i" * 321)
         os.utime(downloads / name, ns=(_awkward_ns(10),) * 2)
     (downloads / "Extracted").mkdir()
@@ -551,6 +552,21 @@ class TestNativeReadOnlyCommandsMatchByteForByte:
         assert found["Gone App"]["mtime"] == _awkward_ns(90) / 1e9
         own = _awkward_ns(45)
         assert found["com.vanished.tool"]["mtime"] == (own // 10**9) + 1e-9 * (own % 10**9) != own / 1e9
+
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="Path.suffix is posixpath.splitext only since Python 3.14")
+    def test_names_whose_only_dots_lead_or_trail(self, parity, sandbox_home, tmp_path, monkeypatch):
+        """The port follows the newest Python. Before 3.14, ``Path("..zip")`` had
+        the suffix ``.zip`` and the stem ``.`` — and was then "already
+        extracted", ``Downloads/.`` being a folder — and ``Path("Foo.")`` had no
+        suffix at all."""
+        monkeypatch.setattr(leftovers, "_APPLICATIONS_DIRS", (tmp_path / "Applications",))
+        _leftovers_world(sandbox_home, tmp_path / "Applications", extra_downloads=("..zip", "Kept.", ".dmg"))
+        _make_app(tmp_path / "Applications", "Trailing.", "com.example.trailing")
+
+        python = parity.python_leftovers_json("all", now=_NOW)
+
+        assert parity.rust_leftovers_json("all", now=_NOW) == python
+        assert not {"..zip", "Kept.", ".dmg"} & {Path(c["path"]).name for c in json.loads(python)["candidates"]}
 
     def test_backups(self, parity, sandbox_home):
         base = backups.default_backup_root()
