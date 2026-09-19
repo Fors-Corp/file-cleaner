@@ -391,7 +391,9 @@ mod unstick {
             action.sa_sigaction = wake as extern "C" fn(libc::c_int) as usize;
             action.sa_flags = 0; // not SA_RESTART: the blocked call must fail with EINTR
             libc::sigemptyset(&mut action.sa_mask);
-            libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut());
+            if libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut()) != 0 {
+                return; // unhandled, SIGUSR2 would end the process: better to wait a hang out
+            }
         }
         thread::spawn(|| loop {
             thread::sleep(TICK);
@@ -452,9 +454,26 @@ fn patiently<T>(path: &str, mut attempt: impl FnMut() -> io::Result<T>) -> io::R
     }
 }
 
-/// The portable listing: entries that cannot be read are left out.
+/// The portable listing: an entry that cannot be read is left out. Reading
+/// on after a failure is also what retries an interrupted read (the stream
+/// does not advance past what it failed to deliver) — but a stream that does
+/// nothing except fail is over.
 fn read_dir(dir: &str) -> io::Result<Vec<fs::DirEntry>> {
-    patiently(dir, || fs::read_dir(dir).map(|entries| entries.flatten().collect()))
+    patiently(dir, || {
+        let mut entries = Vec::new();
+        let mut failures = 0;
+        for entry in fs::read_dir(dir)? {
+            match entry {
+                Ok(entry) => {
+                    entries.push(entry);
+                    failures = 0;
+                }
+                Err(_) if failures < LISTING_RETRIES => failures += 1,
+                Err(_) => break,
+            }
+        }
+        Ok(entries)
+    })
 }
 
 // --------------------------------------------------------------------- walk
