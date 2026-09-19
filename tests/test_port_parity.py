@@ -8,23 +8,35 @@ Phase 2: ``scan-json`` and ``config-json`` read the config file, the rules
 and the volumes for themselves and must print, byte for byte, what
 ``fclean scan --json`` and ``fclean config show --json`` print.
 
+Phase 3: the read-only commands — ``large-files``, ``duplicates`` (finding),
+``leftovers`` (finding), ``backups list`` and ``audit`` print with ``--json``
+what Python prints, byte for byte, SHA-256 digests and modification times
+included; and a plan file written by either is the same bytes, and is
+accepted — and found stale for the same reasons — by the other.
+
 The comparisons live in ``tools/port_parity.py`` so that the checks run by
 hand on a real home directory and the ones run here are the same code.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
+import plistlib
+import re
+import shutil
+import stat
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from test_native_walk import _HELPER, _tree, needs_helper
 
+from filecleaner import backups, leftovers, native_walk, plan, rules, scanner
 from filecleaner import config as config_mod
-from filecleaner import native_walk, rules, scanner
 
 _TOOL = Path(__file__).resolve().parent.parent / "tools" / "port_parity.py"
 _RULES = [
@@ -347,3 +359,333 @@ class TestNativeReportsMatchByteForByte:
         assert [{k: v for k, v in r.items() if k != "enabled"} for r in report["rules"]] == [
             r.to_dict() for r in rules.BUILTIN_RULES
         ]
+
+
+# --------------------------------------------------------------------------
+# Phase 3: the read-only commands
+# --------------------------------------------------------------------------
+
+
+def _awkward_ns(days_ago: float) -> int:
+    """A time CPython and the helper spell differently as floats: one adds the
+    two halves (``sec + 1e-9 * nsec``), the other divides the nanoseconds. About
+    a quarter of all times are like this, so a port that knows only one formula
+    is wrong about a quarter of all files."""
+    ns = int((_NOW - days_ago * 86400) * 1e9) + 1
+    while (ns // 10**9) + 1e-9 * (ns % 10**9) == ns / 1e9:
+        ns += 4999
+    return ns
+
+
+def _files_world(home: Path) -> list[str]:
+    """Every way one file is reached twice, contents that agree for the first
+    64 KiB and beyond it, and paths that sort one way as paths and the other
+    way as strings."""
+    start = b"A" * 70000
+    files = {
+        "r/a/b/same.bin": b"dup-one " * 1000,
+        "r/a-c/b/same.bin": b"dup-one " * 1000,  # sorts after r/a/... as a path, before it as a string
+        "r/a/same2.bin": b"dup-one " * 1000,
+        "r/big/x.bin": start + b"tail-X",
+        "r/big/y.bin": start + b"tail-Y",  # the same first 64 KiB, and not a duplicate
+        "r/big/x-copy.bin": start + b"tail-X",
+        "r/Café/é.bin": b"unicode " * 900,
+        "r/Café/z.bin": b"unicode " * 900,
+        'r/odd/new\nline "q".bin': b"odd " * 2000,
+        "r/odd/plain.bin": b"odd " * 2000,
+        "r/small/tiny1": b"t" * 10,
+        "r/small/tiny2": b"t" * 10,
+        "r/empty1": b"",
+        "r/empty2": b"",
+        "r/unique.bin": bytes(range(256)) * 40,
+        "other/same.bin": b"dup-one " * 1000,
+        "r/projects/app/keepme/kept.bin": b"dup-one " * 1000,  # protected by the config below
+    }
+    for name, data in files.items():
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_bytes(data)
+    os.link(home / "r/a/b/same.bin", home / "r/a/b/hard.bin")  # a second name, not a second file
+    (home / "r/link.bin").symlink_to(home / "r/unique.bin")  # never followed
+    (home / "alias").symlink_to(home / "r", target_is_directory=True)  # a root that is a symlink
+    os.mkfifo(home / "r/fifo")
+    for index, name in enumerate(sorted(files)):
+        os.utime(home / name, ns=(_awkward_ns(40 + index),) * 2)
+    config_mod.ensure_dirs()
+    config_mod.CONFIG_FILE.write_text('protected_paths = ["~/r/projects/app/keepme"]\n', encoding="utf-8")
+    return [str(home / "r"), str(home / "alias") + "/", "~/other"]
+
+
+def _make_app(apps_dir: Path, name: str, bundle_id: str | None, fmt=plistlib.FMT_XML) -> None:
+    contents = apps_dir / f"{name}.app" / "Contents"
+    contents.mkdir(parents=True)
+    if bundle_id is not None:
+        (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_id}, fmt=fmt))
+
+
+def _leftovers_world(home: Path, apps_dir: Path, *, lone_folder: bool = False) -> None:
+    _make_app(apps_dir, "Kept", "com.example.kept")
+    _make_app(apps_dir, "Binary", "org.binary.app", plistlib.FMT_BINARY)
+    _make_app(apps_dir, "NoPlist", None)
+    (apps_dir / "Broken.app" / "Contents").mkdir(parents=True)
+    (apps_dir / "Broken.app" / "Contents" / "Info.plist").write_bytes(b"not a plist at all")
+    (apps_dir / "not-an-app").mkdir()
+    support = home / "Library" / "Application Support"
+    folders = ["Gone App"] if lone_folder else ["Gone App", "com.vanished.tool", "Young Orphan"]
+    for name in [*folders, "com.example.kept.savedState", "Kept", "org.binary.app", "NoPlist"]:
+        (support / name / "deep").mkdir(parents=True)
+        (support / name / "deep" / "data.bin").write_bytes(b"d" * 1234)
+        os.utime(support / name / "deep" / "data.bin", ns=(_awkward_ns(90),) * 2)
+        os.utime(support / name / "deep", ns=(_awkward_ns(95),) * 2)
+        os.utime(support / name, ns=(_awkward_ns(100),) * 2)
+    if not lone_folder:
+        os.utime(support / "Young Orphan" / "deep" / "data.bin", ns=(_awkward_ns(3),) * 2)
+        # The folder itself is the newest thing in it: Python reads that time for itself.
+        os.utime(support / "com.vanished.tool", ns=(_awkward_ns(45),) * 2)
+    prefs = home / "Library" / "Preferences"
+    prefs.mkdir(parents=True)
+    (prefs / "com.vanished.tool.plist").write_bytes(b"p" * 77)  # an orphan that is a file
+    os.utime(prefs / "com.vanished.tool.plist", ns=(_awkward_ns(200),) * 2)
+    (prefs / "linked.plist").symlink_to(prefs / "com.vanished.tool.plist")
+    downloads = home / "Downloads"
+    downloads.mkdir()
+    for name in ["Kept.dmg", "app.PKG", "Extracted.ZIP", "Unrelated.zip", "Kept.txt", "..zip"]:
+        (downloads / name).write_bytes(b"i" * 321)
+        os.utime(downloads / name, ns=(_awkward_ns(10),) * 2)
+    (downloads / "Extracted").mkdir()
+    (downloads / "Linked.dmg").symlink_to(downloads / "Kept.dmg")
+    (downloads / "Folder.dmg").mkdir()
+
+
+def _backups_world(base: Path) -> None:
+    whole = datetime(2024, 2, 29, 12, 34, 56)
+    devices = {
+        "00008030-AAAA": ({"Device Name": "Marc's iPhone «é»", "Product Type": "iPhone15,2", "Last Backup Date": whole}, {"IsEncrypted": True}, plistlib.FMT_XML),
+        "00008030-BBBB": ({"Device Name": "", "Last Backup Date": whole.replace(microsecond=250000)}, {"IsEncrypted": 0}, plistlib.FMT_BINARY),
+        "00008030-CCCC": ({"Last Backup Date": "yesterday", "Product Type": "iPad8,1"}, {}, plistlib.FMT_BINARY),
+        "00008030-DDDD": (None, {"IsEncrypted": "yes"}, plistlib.FMT_XML),
+    }
+    for udid, (info, manifest, fmt) in devices.items():
+        (base / udid / "ab").mkdir(parents=True)
+        (base / udid / "ab" / "blob").write_bytes(b"b" * (1000 + len(udid)))
+        (base / udid / "Manifest.db").write_bytes(b"m" * 4096)
+        (base / udid / "Manifest.plist").write_bytes(plistlib.dumps(manifest, fmt=fmt))
+        if info is not None:
+            (base / udid / "Info.plist").write_bytes(plistlib.dumps(info, fmt=fmt))
+    (base / "00008030-DDDD" / "Info.plist").write_bytes(b"<plist>truncated")
+    (base / ".DS_Store").write_bytes(b"x")  # not a folder, not a backup
+    (base / "linked-backup").symlink_to(base / "00008030-AAAA", target_is_directory=True)
+
+
+_AUDIT_LOG = "\n".join(
+    [
+        '{"timestamp": "2026-09-01T10:00:00+00:00", "action": "scan", "candidate_count": 3, "duration_seconds": 0.1}',
+        "",
+        "not json at all",
+        "[1, 2, 3]",
+        '  {"timestamp": "2026-09-02T10:00:00+00:00", "action": "purge", "paths": ["/a/é", "/b/\\u00e9"], "n": 1e16}  ',
+        '{"action": "scan", "z": 1, "a": {"nested": [true, false, null, -0.5, 1e-7]}, "z": "said twice"}',
+        '{"action": "scan", "note": "cut in two by a line separator inside a string"}',
+        '{"action": "restore", "size": 18446744073709551615, "negative": -9223372036854775808}',
+        '{"action": "scan", "trailing": "garbage"} extra',
+        '{"action": "scan", "last": true}',
+    ]
+)
+
+
+@needs_helper
+class TestNativeReadOnlyCommandsMatchByteForByte:
+    @pytest.mark.parametrize("options", [{}, {"top": 3}, {"top": 4, "min_size": 5000}], ids=["defaults", "top", "min-size"])
+    def test_large_files(self, parity, sandbox_home, options):
+        roots = _files_world(sandbox_home)
+
+        python = parity.python_large_files_json(roots, **options)
+
+        assert parity.rust_large_files_json(roots, **options) == python
+        assert len(json.loads(python)["files"]) >= 3
+
+    @pytest.mark.parametrize(
+        "options", [{}, {"min_size": 0}, {"top": 1}, {"top": 0, "min_size": 1}], ids=["defaults", "every-size", "top", "no-limit"]
+    )
+    def test_duplicates(self, parity, sandbox_home, options):
+        roots = _files_world(sandbox_home)
+
+        python = parity.python_duplicates_json(roots, **options)
+
+        assert parity.rust_duplicates_json(roots, **options) == python
+        assert json.loads(python)["total_wasted_bytes"] > 0
+
+    def test_duplicates_say_what_the_fixture_was_built_to_show(self, parity, sandbox_home):
+        roots = _files_world(sandbox_home)
+
+        report = json.loads(parity.rust_duplicates_json(roots, min_size=0, top=0))
+
+        groups = {tuple(Path(p).relative_to(sandbox_home).as_posix() for p in g["paths"]) for g in report["groups"]}
+        assert ("other/same.bin", "r/a/b/hard.bin", "r/a/same2.bin", "r/a-c/b/same.bin") in groups  # in Path order
+        assert ("r/big/x-copy.bin", "r/big/x.bin") in groups  # y.bin agrees for 64 KiB and no further
+        assert ("r/Café/z.bin", "r/Café/é.bin") in groups and ("r/empty1", "r/empty2") in groups
+        named = {name for group in groups for name in group}
+        assert not {n for n in named if "keepme" in n or n.startswith("alias") or n.endswith(("link.bin", "fifo"))}
+        assert hashlib.sha256(b"").hexdigest() in {g["sha256"] for g in report["groups"]}
+
+    @pytest.mark.parametrize("kind", ["apps", "installers", "all"])
+    @pytest.mark.parametrize("lone_folder", [False, True], ids=["sized-by-the-helper", "one-folder-sized-by-python"])
+    def test_leftovers(self, parity, sandbox_home, tmp_path, monkeypatch, kind, lone_folder):
+        monkeypatch.setattr(leftovers, "_APPLICATIONS_DIRS", (tmp_path / "Applications", tmp_path / "no such folder"))
+        _leftovers_world(sandbox_home, tmp_path / "Applications", lone_folder=lone_folder)
+
+        python = parity.python_leftovers_json(kind, now=_NOW)
+
+        assert parity.rust_leftovers_json(kind, now=_NOW) == python
+        assert json.loads(python)["candidates"]
+
+    def test_leftovers_say_what_the_fixture_was_built_to_show(self, parity, sandbox_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(leftovers, "_APPLICATIONS_DIRS", (tmp_path / "Applications",))
+        _leftovers_world(sandbox_home, tmp_path / "Applications")
+
+        found = {Path(c["path"]).name: c for c in json.loads(parity.rust_leftovers_json("all", now=_NOW))["candidates"]}
+
+        assert set(found) == {"Gone App", "com.vanished.tool", "com.vanished.tool.plist", "Kept.dmg", "app.PKG", "Extracted.ZIP"}
+        assert found["Gone App"]["size_bytes"] == 1234 and found["Gone App"]["is_dir"]
+        assert found["com.vanished.tool.plist"]["size_bytes"] == 77 and found["Kept.dmg"]["risk"] == "medium"
+        # The newest time in a folder comes from the helper; the folder's own, when it is the newest, from Python.
+        assert found["Gone App"]["mtime"] == _awkward_ns(90) / 1e9
+        own = _awkward_ns(45)
+        assert found["com.vanished.tool"]["mtime"] == (own // 10**9) + 1e-9 * (own % 10**9) != own / 1e9
+
+    def test_backups(self, parity, sandbox_home):
+        base = backups.default_backup_root()
+        assert json.loads(parity.rust_backups_json()) == {"backups": []}  # no folder at all
+        _backups_world(base)
+
+        python = parity.python_backups_json()
+
+        assert parity.rust_backups_json() == python
+        assert parity.rust_backups_json(base) == parity.python_backups_json(base)
+        listed = {b["udid"]: b for b in json.loads(python)["backups"]}
+        assert listed["00008030-AAAA"]["last_backup_date"] == "2024-02-29T12:34:56" and listed["00008030-AAAA"]["encrypted"]
+        assert listed["00008030-BBBB"]["last_backup_date"] == "2024-02-29T12:34:56.250000"
+        assert listed["00008030-BBBB"]["device_name"] == "00008030-BBBB" and not listed["00008030-BBBB"]["encrypted"]
+        assert listed["00008030-CCCC"]["last_backup_date"] is None and listed["00008030-DDDD"]["encrypted"]
+        assert set(listed) == {"00008030-AAAA", "00008030-BBBB", "00008030-CCCC", "00008030-DDDD", "linked-backup"}
+
+    @pytest.mark.parametrize(("limit", "action"), [(50, None), (0, None), (2, None), (1, "scan"), (0, "purge"), (5, "never")])
+    def test_audit(self, parity, sandbox_home, limit, action):
+        config_mod.ensure_dirs()
+        config_mod.AUDIT_LOG_PATH.write_text(_AUDIT_LOG, encoding="utf-8")
+
+        python = parity.python_audit_json(limit, action)
+
+        assert parity.rust_audit_json(limit, action) == python
+        assert (action == "never") == (json.loads(python)["entries"] == [])
+
+    def test_an_audit_log_that_is_not_there_is_empty_and_stays_away(self, parity, sandbox_home):
+        assert json.loads(parity.rust_audit_json()) == {"entries": []}
+        assert not config_mod.AUDIT_LOG_PATH.exists()  # Python's reader would have created it
+
+    def test_each_accepts_the_plan_the_other_writes(self, parity, world, tmp_path):
+        home, volume = world
+        _configure(volume)
+        (home / "Documents" / "Café ü").mkdir()
+        (home / "Documents" / "Café ü" / ".DS_Store").write_bytes(b"x" * 6)
+        _age(home / "Documents" / "Café ü" / ".DS_Store", 400)
+        by_python, by_rust = tmp_path / "plans" / "python.json", tmp_path / "plans" / "rust.json"
+        parity.python_save_plan(by_python, home, now=_NOW, created_at="2026-09-19T00:00:00+00:00", include_disabled=True)
+        parity.rust_save_plan(by_rust, home, now=_NOW, created_at="2026-09-19T00:00:00+00:00", include_disabled=True)
+
+        assert by_rust.read_bytes() == by_python.read_bytes()
+        assert "Caf\\u00e9 \\u00fc" in by_rust.read_text(encoding="ascii")  # json.dumps' ensure_ascii, not the reports'
+        assert stat.S_IMODE(by_rust.stat().st_mode) == 0o600 and not by_rust.with_name("rust.json.tmp").exists()
+        untouched = parity.python_plan_check_json(by_rust)
+        assert parity.rust_plan_check_json(by_python) == untouched and json.loads(untouched)["stale"] == []
+
+        # Then the world moves on, in each of the ways a plan can go stale.
+        planned = {Path(c["path"]).name: Path(c["path"]) for c in json.loads(by_python.read_text())["candidates"]}
+        planned["old.log"].write_bytes(b"grown since it was reviewed")
+        planned["ancient.zip"].unlink()
+        (planned["node_modules"] / "pkg" / "added.js").write_bytes(b"new")
+        shutil.rmtree(planned["thrown"])
+        planned["thrown"].write_bytes(b"a file where a folder was")
+        planned["crash.ips"].unlink()
+        planned["crash.ips"].symlink_to(home / "Documents")
+
+        for plan_file in (by_python, by_rust):
+            python = parity.python_plan_check_json(plan_file)
+            assert parity.rust_plan_check_json(plan_file) == python
+        reasons = {Path(s["path"]).name: s["reason"] for s in json.loads(python)["stale"]}
+        assert reasons == {
+            "old.log": "modified since the plan was written",
+            "ancient.zip": "no longer exists",
+            "node_modules": "modified since the plan was written",
+            "thrown": "changed between file and directory",
+            "crash.ips": "is now a symlink",
+        }
+        assert len(json.loads(python)["fresh"]) >= 3
+
+    @pytest.mark.parametrize(
+        ("text", "python_error"),
+        [
+            ("{not json", "is not valid JSON"),
+            ("[1, 2]", "expected a JSON object"),
+            ('{"format_version": 2, "candidates": []}', "unsupported plan format_version 2 (expected 1)"),
+            ('{"format_version": "1", "candidates": []}', "unsupported plan format_version '1' (expected 1)"),
+            ('{"candidates": []}', "unsupported plan format_version None (expected 1)"),
+            ('{"format_version": 1}', "malformed plan file: 'candidates'"),
+            ('{"format_version": 1, "candidates": [{"path": "/x"}]}', "malformed plan file: 'size_bytes'"),
+        ],
+    )
+    def test_a_bad_plan_is_refused_by_both(self, parity, sandbox_home, tmp_path, text, python_error):
+        bad = tmp_path / "bad.json"
+        bad.write_text(text, encoding="utf-8")
+
+        with pytest.raises(plan.PlanError, match=re.escape(python_error)):
+            parity.python_plan_check_json(bad)
+        with pytest.raises(RuntimeError, match=re.escape(python_error)):
+            parity.rust_plan_check_json(bad)
+        with pytest.raises(RuntimeError, match="cannot read"):
+            parity.rust_plan_check_json(tmp_path / "no such plan.json")
+
+    @pytest.mark.parametrize(
+        "coerced",
+        ['"size_bytes": "12"', '"is_dir": 0', '"mtime": "5.0"', '"path": 12'],
+    )
+    def test_the_port_refuses_what_python_would_coerce(self, parity, sandbox_home, tmp_path, coerced):
+        """Stricter, never looser (docs/PORT.md): a hand-edited plan whose
+        values are the wrong type is read by Python and refused here."""
+        fields = {"path": '"/nowhere"', "size_bytes": "12", "is_dir": "false", "mtime": "5.0", "rule_id": '"r"', "category": '"c"'}
+        fields[coerced.split('"')[1]] = coerced.split(": ", 1)[1]
+        candidate = ", ".join(f'"{key}": {value}' for key, value in fields.items())
+        edited = tmp_path / "edited.json"
+        edited.write_text(f'{{"format_version": 1, "candidates": [{{{candidate}}}]}}', encoding="utf-8")
+
+        assert json.loads(parity.python_plan_check_json(edited))["stale"][0]["reason"] == "no longer exists"
+        with pytest.raises(RuntimeError, match="malformed plan file"):
+            parity.rust_plan_check_json(edited)
+
+    def test_limits_python_mishandles_are_refused_by_name(self, parity, sandbox_home):
+        """``--top 0`` is an IndexError in ``large-files``; a negative ``--top``
+        or ``--limit`` makes Python slice from the wrong end."""
+        roots = _files_world(sandbox_home)
+        with pytest.raises(IndexError):
+            parity.python_large_files_json(roots, top=0)
+        for refused, message in (
+            (lambda: parity.rust_large_files_json(roots, top=0), "--top must be at least 1"),
+            (lambda: parity.rust_duplicates_json(roots, top=-1), "--top must not be negative"),
+            (lambda: parity.rust_audit_json(-1), "--limit must not be negative"),
+        ):
+            with pytest.raises(RuntimeError, match=message):
+                refused()
+
+    def test_none_of_them_writes_anything(self, parity, sandbox_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(leftovers, "_APPLICATIONS_DIRS", (tmp_path / "Applications",))
+        roots = _files_world(sandbox_home)
+        _leftovers_world(sandbox_home, tmp_path / "Applications")
+        _backups_world(backups.default_backup_root())
+        before = {p: p.lstat().st_mtime_ns for p in tmp_path.rglob("*")}
+
+        parity.rust_large_files_json(roots)
+        parity.rust_duplicates_json(roots, min_size=0)
+        parity.rust_leftovers_json("all", now=_NOW)
+        parity.rust_backups_json()
+        parity.rust_audit_json()
+
+        assert {p: p.lstat().st_mtime_ns for p in tmp_path.rglob("*")} == before

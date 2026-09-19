@@ -6,6 +6,12 @@ is the reference, and a phase is done when these pass on real data.
     PYTHONPATH=src python tools/port_parity.py scan-json [ROOT]
     PYTHONPATH=src python tools/port_parity.py config-json
     PYTHONPATH=src python tools/port_parity.py pyjson [N]
+    PYTHONPATH=src python tools/port_parity.py large-files [PATH...]
+    PYTHONPATH=src python tools/port_parity.py duplicates [PATH...]
+    PYTHONPATH=src python tools/port_parity.py leftovers
+    PYTHONPATH=src python tools/port_parity.py backups
+    PYTHONPATH=src python tools/port_parity.py audit
+    PYTHONPATH=src python tools/port_parity.py plan [ROOT]
 
 `protected` compares `safety.is_protected` with the Rust port's over real
 paths and adversarial respellings of them. Rust may be stricter, never looser.
@@ -17,6 +23,13 @@ done in Rust — on the same root with the same rules.
 same config file itself: byte for byte, but for the scan's wall-clock
 `duration_seconds`. `pyjson` checks the port's JSON writer against
 `json.dumps` on random floats and strings.
+`large-files` and `duplicates` (phase 3) compare what those commands print
+with `--json` — for `duplicates`, without `--apply` — with what the port
+prints, byte for byte, SHA-256 digests included. PATHS default to home.
+`leftovers`, `backups` and `audit` do the same for `fclean leftovers --json`
+(each `--kind`), `fclean backups list --json` and `fclean audit --json`.
+`plan` has each implementation save a plan of the same scan — the two files
+must be the same bytes — and then has each revalidate both files.
 
 Read-only: nothing here moves, restores or purges anything. Exit status 1 on
 any disagreement that is not explained.
@@ -24,6 +37,7 @@ any disagreement that is not explained.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import json
 import os
@@ -32,14 +46,28 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import types
 import unicodedata
+import warnings
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
+from filecleaner import (
+    audit,
+    backups,
+    duplicates,
+    largefiles,
+    leftovers,
+    native_walk,
+    output,
+    plan,
+    safety,
+    scanner,
+)
 from filecleaner import config as config_mod
-from filecleaner import native_walk, output, safety, scanner
 from filecleaner import rules as rules_mod
 
 REPO = Path(__file__).resolve().parent.parent
@@ -222,19 +250,29 @@ def rust(command: str, request: dict[str, Any]) -> subprocess.CompletedProcess[s
     return subprocess.run([str(helper()), command], input=json.dumps(request), capture_output=True, text=True)
 
 
-def rust_scan_json(root: Path | None, *, now: float, only_rules: set[str] | None = None,
-                   include_disabled: bool = False, extra_excludes: tuple[Path, ...] = ()) -> str:
-    out = rust("scan-json", native_request(
-        root=None if root is None else str(root), now=now, include_disabled=include_disabled,
-        only_rules=None if only_rules is None else sorted(only_rules), extra_excludes=[str(p) for p in extra_excludes],
-    ))
+def scan_selection(root: Path | None, *, now: float, only_rules: set[str] | None = None,
+                   include_disabled: bool = False, extra_excludes: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """`fclean scan [ROOT] --rules ... --include-disabled --exclude ...`, as the port is asked for it."""
+    return {
+        "root": None if root is None else str(root), "now": now, "include_disabled": include_disabled,
+        "only_rules": None if only_rules is None else sorted(only_rules), "extra_excludes": [str(p) for p in extra_excludes],
+    }
+
+
+def rust_scan_json(root: Path | None, *, now: float, **select: Any) -> str:
+    out = rust("scan-json", native_request(**scan_selection(root, now=now, **select)))
     if out.returncode != 0:
         raise RuntimeError(out.stderr.strip())
     return out.stdout
 
 
 def python_scan_json(root: Path | None, *, now: float, **select: Any) -> str:
-    """What `fclean scan --json` prints — without its entry in the audit log.
+    """What `fclean scan --json` prints — without its entry in the audit log."""
+    return output.dumps(python_scan_result(root, now=now, **select)) + "\n"
+
+
+def python_scan_result(root: Path | None, *, now: float, **select: Any) -> scanner.ScanResult:
+    """The scan behind `fclean scan` and `fclean clean`.
     Through the native walker, whose results come in a defined order (the
     pure-Python walk yields in whatever order the filesystem lists), and with
     the clock held still so that both sides agree on every age."""
@@ -250,7 +288,7 @@ def python_scan_json(root: Path | None, *, now: float, **select: Any) -> str:
             del os.environ[native_walk.HELPER_ENV]
         else:
             os.environ[native_walk.HELPER_ENV] = previous
-    return output.dumps(result) + "\n"
+    return result
 
 
 def python_config_json() -> str:
@@ -322,6 +360,198 @@ def check_pyjson(count: int) -> bool:
                  output.dumps({"strings": strings, "floats": floats}) + "\n", out.stdout)
 
 
+# ------------------------------------------- phase 3: the read-only commands
+
+
+@contextlib.contextmanager
+def through_the_native_walker() -> Iterator[None]:
+    """The reference for anything built on ``filewalk`` is Python *over the
+    native walk*: which of a hard-linked file's names is reported is the
+    walker's to choose, so the pure-Python walk gives a different and equally
+    valid answer. A silent fallback to it would compare the wrong thing, and
+    is an error here."""
+    previous = os.environ.get(native_walk.HELPER_ENV)
+    os.environ[native_walk.HELPER_ENV] = str(helper())
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            yield
+    finally:
+        if previous is None:
+            del os.environ[native_walk.HELPER_ENV]
+        else:
+            os.environ[native_walk.HELPER_ENV] = previous
+
+
+def command_roots(paths: Sequence[str]) -> list[Path]:
+    """What ``fclean duplicates`` and ``fclean large-files`` make of PATHS."""
+    return [Path(p).expanduser() for p in paths] if paths else [Path.home()]
+
+
+def rust_json(command: str, **request: Any) -> str:
+    out = rust(command, native_request(**request))
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip())
+    return out.stdout
+
+
+def python_large_files_json(paths: Sequence[str] = (), *, top: int = 30, min_size: int = 0) -> str:
+    config = config_mod.load_config(warnings=[])
+    with through_the_native_walker():
+        found = largefiles.find_large_files(command_roots(paths), config, top=top, min_size_bytes=min_size)
+    return output.dumps({"files": [f.to_dict() for f in found]}) + "\n"
+
+
+def rust_large_files_json(paths: Sequence[str] = (), **options: int) -> str:
+    return rust_json("large-files-json", paths=list(paths), **options)
+
+
+def python_duplicates_json(paths: Sequence[str] = (), *, top: int = 30, min_size: int = 4096) -> str:
+    """What ``fclean duplicates --json`` prints when it is not asked to apply."""
+    config = config_mod.load_config(warnings=[])
+    with through_the_native_walker():
+        groups = duplicates.find_duplicates(command_roots(paths), config, min_size_bytes=min_size, max_groups=top)
+    report = {"groups": [g.to_dict() for g in groups], "total_wasted_bytes": sum(g.wasted_bytes for g in groups)}
+    return output.dumps(report) + "\n"
+
+
+def rust_duplicates_json(paths: Sequence[str] = (), **options: int) -> str:
+    return rust_json("duplicates-json", paths=list(paths), **options)
+
+
+def python_leftovers_json(kind: str = "all", *, now: float) -> str:
+    """What ``fclean leftovers --kind KIND --json`` prints when it is not asked
+    to apply, with the clock held still so both sides agree on every age."""
+    config = config_mod.load_config(warnings=[])
+    clock = leftovers.time
+    leftovers.time = types.SimpleNamespace(time=lambda: now)  # type: ignore[assignment]
+    try:
+        with through_the_native_walker():
+            candidates = leftovers.find_app_leftovers(config) if kind in ("apps", "all") else []
+            candidates += leftovers.find_installer_cleanup(config) if kind in ("installers", "all") else []
+    finally:
+        leftovers.time = clock
+    report = {"candidates": [c.to_dict() for c in candidates], "total_size_bytes": sum(c.size_bytes for c in candidates)}
+    return output.dumps(report) + "\n"
+
+
+def rust_leftovers_json(kind: str = "all", *, now: float) -> str:
+    # Python looks the applications folders up once, on import; tests move them.
+    apps = [str(path) for path in leftovers._APPLICATIONS_DIRS]
+    return rust_json("leftovers-json", kind=kind, now=now, applications_dirs=apps)
+
+
+def check_leftovers_json() -> bool:
+    now = time.time()
+    ok = True
+    for kind in ("apps", "installers", "all"):
+        t0 = time.monotonic()
+        native = rust_leftovers_json(kind, now=now)
+        t_rust = time.monotonic() - t0
+        t0 = time.monotonic()
+        python = python_leftovers_json(kind, now=now)
+        print(f"  python {time.monotonic() - t0:.1f}s, rust {t_rust:.1f}s")
+        ok = _same(f"leftovers --kind {kind} --json", python, native) and ok
+    return ok
+
+
+def python_backups_json(base: Path | None = None) -> str:
+    return output.dumps({"backups": [b.to_dict() for b in backups.find_backups(base)]}) + "\n"
+
+
+def rust_backups_json(base: Path | None = None) -> str:
+    return rust_json("backups-list-json", base=None if base is None else str(base))
+
+
+def check_backups_json() -> bool:
+    try:
+        python = python_backups_json()
+    except backups.BackupAccessDenied as denied:
+        # Nothing to compare without Full Disk Access; the port must say so too.
+        refused = rust("backups-list-json", native_request())
+        print(f"backups list --json: macOS refused both (rust exit {refused.returncode})")
+        return refused.returncode != 0 and str(denied) in refused.stderr
+    return _same("backups list --json", python, rust_backups_json())
+
+
+def python_audit_json(limit: int = 50, action: str | None = None) -> str:
+    """What ``fclean audit --json`` prints. Python's reader creates the log
+    and sets its mode on the way in; a parity check is no reason to touch the
+    data directory, so the reader is pointed at the file as it is."""
+    real = audit.get_audit_log_path
+    audit.get_audit_log_path = lambda: config_mod.AUDIT_LOG_PATH  # type: ignore[assignment]
+    try:
+        entries = audit.read_audit_log(limit=limit, action=action)
+    finally:
+        audit.get_audit_log_path = real  # type: ignore[assignment]
+    return output.dumps({"entries": entries}) + "\n"
+
+
+def rust_audit_json(limit: int = 50, action: str | None = None) -> str:
+    return rust_json("audit-json", limit=limit, action=action)
+
+
+def check_audit_json() -> bool:
+    ok = True
+    for limit, action in ((50, None), (0, None), (7, "scan"), (0, "purge")):
+        label = f"audit --limit {limit}" + (f" --action {action}" if action else "") + " --json"
+        ok = _same(label, python_audit_json(limit, action), rust_audit_json(limit, action)) and ok
+    return ok
+
+
+def python_save_plan(path: Path, root: Path | None, *, now: float, created_at: str, **select: Any) -> None:
+    """``fclean clean --save-plan PATH``, with the plan's own clock held still."""
+    saved = plan.CleanupPlan.from_scan(python_scan_result(root, now=now, **select))
+    saved.created_at = created_at
+    plan.save_plan(saved, path)
+
+
+def rust_save_plan(path: Path, root: Path | None, *, now: float, created_at: str, **select: Any) -> None:
+    rust_json("plan-save", save_plan=str(path), created_at=created_at, **scan_selection(root, now=now, **select))
+
+
+def python_plan_check_json(path: Path) -> str:
+    """What ``fclean apply PLAN`` would move and what it would leave, and why."""
+    fresh, stale = plan.revalidate(plan.load_plan(path))
+    return output.dumps({"fresh": [c.to_dict() for c in fresh], "stale": [s.to_dict() for s in stale]}) + "\n"
+
+
+def rust_plan_check_json(path: Path) -> str:
+    return rust_json("plan-check-json", plan=str(path))
+
+
+def check_plan(root: Path | None) -> bool:
+    """Each writes a plan of the same scan; the two files must be the same
+    bytes, and each reader must say the same of either."""
+    now = time.time()
+    created_at = "2026-09-19T00:00:00+00:00"
+    with tempfile.TemporaryDirectory() as scratch:
+        by_python, by_rust = Path(scratch) / "python.json", Path(scratch) / "rust.json"
+        python_save_plan(by_python, root, now=now, created_at=created_at)
+        rust_save_plan(by_rust, root, now=now, created_at=created_at)
+        ok = _same("plan file", by_python.read_text(encoding="utf-8"), by_rust.read_text(encoding="utf-8"))
+        for written, path in (("python's", by_python), ("rust's", by_rust)):
+            ok = _same(f"revalidating {written} plan", python_plan_check_json(path), rust_plan_check_json(path)) and ok
+    return ok
+
+
+_READ_ONLY: dict[str, tuple[Callable[..., str], Callable[..., str]]] = {
+    "large-files": (python_large_files_json, rust_large_files_json),
+    "duplicates": (python_duplicates_json, rust_duplicates_json),
+}
+
+
+def check_read_only(command: str, paths: Sequence[str]) -> bool:
+    python_json, native_json = _READ_ONLY[command]
+    t0 = time.monotonic()
+    native = native_json(paths)
+    t_rust = time.monotonic() - t0
+    t0 = time.monotonic()
+    python = python_json(paths)
+    print(f"  python {time.monotonic() - t0:.1f}s, rust {t_rust:.1f}s")
+    return _same(f"{command} --json", python, native)
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["protected"]:
@@ -335,6 +565,16 @@ if __name__ == "__main__":
         ok = check_config_json()
     elif args[:1] == ["pyjson"]:
         ok = check_pyjson(int(args[1]) if len(args) > 1 else 20000)
+    elif args[:1] == ["leftovers"]:
+        ok = check_leftovers_json()
+    elif args[:1] == ["backups"]:
+        ok = check_backups_json()
+    elif args[:1] == ["audit"]:
+        ok = check_audit_json()
+    elif args[:1] == ["plan"]:
+        ok = check_plan(Path(args[1]).expanduser() if len(args) > 1 else None)
+    elif args[:1] and args[0] in _READ_ONLY:
+        ok = check_read_only(args[0], args[1:])
     else:
         sys.exit(__doc__)
     print("PARITY" if ok else "MISMATCH")

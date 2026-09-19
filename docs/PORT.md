@@ -151,7 +151,7 @@ after "is not valid TOML:" is the Rust parser's; a TOML datetime under an
 the port never creates a default `config.toml`, and `scan-json` writes no
 audit-log entry — both arrive with the commands themselves.
 
-### Phase 3 — read-only commands
+### Phase 3 — read-only commands  *(done 2026-09-19)*
 `filewalk` (128, walk already native) · `duplicates` find-only (199) ·
 `largefiles` (50) · `leftovers` (171) · `plan` save/load/revalidate (153) ·
 `audit` read side (89) · `backups` list (150).
@@ -159,6 +159,89 @@ audit-log entry — both arrive with the commands themselves.
 SHA-256 must match Python's digests exactly (they are exposed in output).
 *Done when:* each command's `--json` output matches Python's on real data, and
 `plan.json` written by either implementation is accepted by the other.
+
+*Shipped:* one Rust module per Python module — `filewalk.rs`, `largefiles.rs`,
+`duplicates.rs`, `leftovers.rs`, `backups.rs`, `audit.rs`, `plan.rs` — behind
+`fclean-walk large-files-json`, `duplicates-json`, `leftovers-json`,
+`backups-list-json`, `audit-json`, `plan-save` and `plan-check-json`. Each
+reads the config for itself, as phase 2's do. Nothing `fclean` runs calls
+them, and nothing that *acts* on a finding is ported: `duplicates --apply`,
+`leftovers --apply`, `backups clean` and `apply PLAN` are phase 4.
+`plan-save` writes the one file it is asked to write; everything else writes
+nothing (a test compares every mtime under the sandbox before and after).
+
+*Measured* (`tools/port_parity.py large-files | duplicates | leftovers |
+backups | audit | plan`, all read-only):
+
+| Gate | Result |
+|---|---|
+| `large-files --json`, real home | identical, 5,257 bytes (Python 48.7 s, Rust 24.9 s) |
+| `duplicates --json`, `~/Documents ~/Desktop ~/Downloads` (651,902 of the files there evicted to iCloud) | identical, 12,587 bytes (Python 17.5 s, Rust 10.6 s); 0 files downloaded |
+| `leftovers --json`, each `--kind`, real `~/Library` | identical, 191,136 bytes |
+| `audit --json`, real log: `--limit 50`, all of it, `--action` filters | identical; the whole log is 1,109,620 bytes |
+| `clean --save-plan`, real home | the two plan files identical, 98,528 bytes; each implementation revalidates both the same way (98,320 bytes) |
+| `backups list --json`, real machine | macOS refused both without Full Disk Access, in the same words; the listing itself is proven on fixtures only |
+| Fixture matrix in CI (`tests/test_port_parity.py`, 37 tests): one file reached twice in every way, contents equal for 64 KiB and no further, XML and binary plists whole and damaged, an audit log with everything a line can be, a plan gone stale in each way it can, bad plans | identical, every cell; bad plans refused by both in the same words |
+
+The reference for everything built on `filewalk` is Python **with the native
+walker**: which name of a hard-linked file is reported is the walker's choice,
+so the pure-Python walk is a different and equally valid answer. A silent
+fallback to it is an error in the gate.
+
+*What the byte-level gate caught:*
+- **`st_mtime` has two spellings.** CPython adds the halves as floats
+  (`sec + 1e-9 * nsec`); the helper divides the nanoseconds (`ns / 1e9`). They
+  differ in the last bit for **27%** of times. Until now every printed mtime
+  had come from the helper, so there had only ever been one. `leftovers`
+  prints both — a file's own time is Python's, the newest time inside a
+  folder is the helper's, and the larger of the two wins — so the port has
+  both (`st_mtime`). And `dir_stats_many` asks the helper only when there is
+  more than one folder: a lone folder's time is Python's. Ported as it is.
+- **`sorted(paths)` is not `sorted(strings)`.** A `Path` compares part by
+  part, so `/r/a/b` sorts before `/r/a-c/b` although `-` sorts before `/`.
+  The order of a duplicate group's paths (`pypath::path_cmp`).
+- **`suffix` and `stem`** are `posixpath.splitext` since Python 3.14: `.app`
+  and `..app` have no suffix, `Foo.` has `.` (`pypath::splitext`). The port
+  follows the Python it is compared with.
+- **A plan file is `json.dumps(..., indent=2)`**, with `ensure_ascii` left on:
+  `Café`, surrogate pairs beyond U+FFFF, and DEL escaped — unlike every
+  `--json` report (`pyjson::dumps_ascii`).
+- **`splitlines` and `strip`** end a line and strip it at more characters
+  than `\n` and Unicode white space (U+2028, U+001C–U+001F…). An audit entry
+  holding a raw U+2028 is two broken lines to both implementations.
+
+*What the real-data gate caught, in Python:* the `duplicates` gate did not
+finish. 651,902 files under `~/Documents` and `~/Desktop` had been evicted to
+iCloud (`SF_DATALESS`), and reading one makes macOS download it: hashing them
+blocks for hours and fills the disk. Fixed on both sides (1.7.2): a same-size
+candidate that is not on this disk is never read — it wastes no space here,
+so it is no duplicate worth finding. `large-files` and `scan` still count
+such a file at its full logical size; that is a separate question.
+Two more, found by the fixtures: a truncated XML plist escaped `plistlib` as
+an `ExpatError` and took `backups list` or `leftovers` down (1.7.2:
+`plists.load_dict`); and `leftovers` listed `~/Library/Containers` without
+the retry of 1.6.1 (1.7.2).
+
+*Known intentional divergences* — all stricter, none looser:
+- Limits Python mishandles are refused by name: `large-files --top 0` (an
+  `IndexError` in Python as soon as one file is found), and a negative
+  `duplicates --top` or `audit --limit` (Python slices from the wrong end).
+- A plan is read strictly. Python coerces (`int("12")`, `bool(0)`,
+  `float("5.0")`, `str(12)`, `True == 1` for the version); the port takes
+  what Python *writes* and refuses a hand-edited value of the wrong type.
+  Error details after "is not valid JSON:" and "cannot read" are Rust's.
+- `audit`: Python's reader creates the log and sets its mode on the way in;
+  the port creates nothing, and a log that is not there reads as empty. A
+  line holding `NaN`, `Infinity`, an integer beyond 64 bits, a lone
+  surrogate or `-0` is read by Python and skipped or respelled here; File
+  Cleaner writes none of them.
+- `backups`: a `Device Name` or `Product Type` that is not text is treated as
+  missing (Python prints whatever it found). A date is rounded to the
+  microsecond half-up where `timedelta` rounds half-even.
+- A damaged plist of any kind names nothing, which is what Python does too
+  as of 1.7.2.
+- A file name that is not Unicode is left out of `leftovers` and `backups`
+  (Python prints it with surrogate escapes); APFS allows none.
 
 ### Phase 4 — everything that mutates  *(highest risk; last before the TUI)*
 `quarantine` move/restore/purge/secure-purge (498) · `duplicates --apply` ·

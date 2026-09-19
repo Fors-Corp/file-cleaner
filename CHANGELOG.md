@@ -30,6 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still using a bare `iterdir()`, so an interrupted listing (`EINTR`, after a
   hang) silently hid every leftover in that folder.
 
+### Internal
+- Third phase of the Rust port (`docs/PORT.md`): the read-only commands.
+  `fclean-walk large-files-json`, `duplicates-json`, `leftovers-json`,
+  `backups-list-json`, `audit-json`, `plan-save` and `plan-check-json` print
+  what `fclean large-files`, `duplicates`, `leftovers`, `backups list` and
+  `audit` print with `--json` — byte for byte on real data, SHA-256 digests
+  and modification times included — and a plan written by either
+  implementation is the same bytes and is accepted, and found stale for the
+  same reasons, by the other. Nothing that acts on a finding is ported, and
+  still nothing `fclean` runs uses any of it. The helper gains two
+  dependencies, `sha2` and `plist`. What the comparison caught — CPython and
+  the helper spell 27% of modification times differently, `Path`s do not sort
+  as strings — is written up in the plan.
+
 ## [1.7.1] - 2026-09-19
 
 ### Fixed
