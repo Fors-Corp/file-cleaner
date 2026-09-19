@@ -613,7 +613,7 @@ def duplicates(
         return
 
     try:
-        to_delete = duplicates_mod.select_deletions(groups, keep=keep)
+        to_delete, refused = duplicates_mod.select_deletions(groups, keep=keep)
     except ValueError as exc:
         raise CliError(str(exc)) from exc
 
@@ -638,7 +638,7 @@ def duplicates(
 
     action = quarantine_mod.quarantine_candidates(candidates, cfg, allowed_roots=tuple(roots))
     purge_result = quarantine_mod.purge_entries([e.id for e in action.entries], cfg)
-    all_skipped = action.skipped + purge_result.skipped
+    all_skipped = refused + action.skipped + purge_result.skipped
 
     if as_json:
         output_mod.emit(

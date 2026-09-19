@@ -12,6 +12,15 @@ def test_finds_largest_files_in_order(tmp_path, sandbox_config):
     assert results[0].path.name == "big.bin"
 
 
+def test_one_file_reached_twice_is_listed_once(one_file_reached_twice, sandbox_config):
+    """Listing one physical file twice would double-count the space it uses."""
+    roots, real = one_file_reached_twice
+
+    results = largefiles.find_large_files(roots, sandbox_config, top=10)
+
+    assert [r.size_bytes for r in results] == [real.stat().st_size]
+
+
 def test_respects_min_size(tmp_path, sandbox_config):
     (tmp_path / "small.bin").write_bytes(b"x" * 10)
     (tmp_path / "big.bin").write_bytes(b"x" * 1000)
