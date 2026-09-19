@@ -167,3 +167,16 @@ class TestScanConcurrency:
         cfg = config_mod.default_config()
         config_mod.set_value(cfg, "scan_concurrency", "8")
         assert cfg["scan_concurrency"] == 8
+
+
+def test_classifier_path_follows_the_data_dir(sandbox_home, tmp_path):
+    """The classifier's weights live in the data dir *as it is now*, not
+    where it pointed at import time. When this was a module-level constant,
+    redirecting the data dir (as every test does) left it aimed at the real
+    ``~/.filecleaner`` — so the suite trained the user's real classifier on
+    fixture data, and failed outright on a machine with no such directory."""
+    path = config_mod.get_classifier_path()
+
+    assert path == config_mod.DATA_DIR / "classifier.json"
+    assert path.is_relative_to(tmp_path)
+    assert path.parent.is_dir()

@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-19
+
+### Fixed
+- The organizer classifier's file location was captured in a module-level
+  constant at import time, so it kept pointing at the original
+  `~/.filecleaner` even after the data directory was redirected — the same
+  class of bug 1.0.0 removed from the other path defaults, reintroduced
+  with the classifier in 1.3.0. It is now derived from the data directory
+  at the moment it is asked for.
+
+  In practice this only bit the test suite, but it bit twice: the suite's
+  sandbox redirects the data directory, so the TUI's recategorize test was
+  writing fixture data into the developer's *real* classifier file on every
+  run; and on a machine with no `~/.filecleaner` at all — every CI runner —
+  it failed outright, which is why CI on `main` had been red since 1.3.0.
+
 ## [1.5.0] - 2026-09-19
 
 ### Added
