@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-19
+
+### Added
+- An optional native scan walker, `fclean-walk` (Rust, in
+  `native/fclean-walk`), built by `install.sh` when `cargo` is available.
+  After 1.3.2 a scan was no longer CPU-bound in Python but latency-bound on
+  directory I/O, running on effectively one core — so the win comes from
+  how the filesystem is asked, not from faster instructions:
+  - directory listings fan out across every core (work-stealing), which
+    the Python walk cannot do under the GIL;
+  - rules that start in the same directory (`**/node_modules` and
+    `**/.DS_Store` both start at the scan root) share one traversal instead
+    of each listing the whole tree;
+  - matched directories are sized with macOS's `getattrlistbulk(2)` — name,
+    type, size and mtime for a whole directory per syscall — instead of one
+    `lstat` per file, with the portable path kept as a fallback.
+
+  Measured on a whole-home scan (336k folders, 3.2M entries, 32 GB of
+  matched folders): 74.5 s with the Python walker, 14.9 s with the helper,
+  and the same 329 candidates — identical paths, sizes and rules — and the
+  same read errors.
+- `FCLEAN_NATIVE_WALK`: a path to the helper, or `0` to force the Python
+  walker.
+
+The helper is an accelerator, never an authority. It is optional (no
+toolchain, no helper, no change in behaviour); any failure falls back to
+the Python walker with a warning, never a partial result; it is loaded
+only from inside the package or from `FCLEAN_NATIVE_WALK`, never from
+`PATH`; and the scanner treats what it reports as untrusted — every path
+must lie inside the walk's own root and pass the authoritative, resolving
+deny-list check in Python, and rule thresholds are applied in Python. The
+Python walker remains the reference implementation, and the test suite
+runs the two against each other.
+
 ## [1.4.0] - 2026-09-19
 
 ### Changed

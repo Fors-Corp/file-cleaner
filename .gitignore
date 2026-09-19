@@ -11,3 +11,6 @@ dist/
 coverage.xml
 htmlcov/
 .DS_Store
+# native scan walker: cargo build output, and the copy install.sh places in the package
+native/fclean-walk/target/
+src/filecleaner/_bin/

@@ -388,6 +388,9 @@ class TestProtectedPathsDuringWalk:
 class TestProgress:
     @staticmethod
     def _scan(tmp_path, sandbox_config, monkeypatch, **kwargs):
+        # Per-directory cadence is the Python walker's; the native helper
+        # reports on its own schedule (see test_native_walk.py).
+        monkeypatch.setenv("FCLEAN_NATIVE_WALK", "0")
         monkeypatch.setattr(scanner, "_PROGRESS_EVERY_DIRS", 1)
         scoped = tmp_path / "scoped"
         for name in ("a", "b", "c"):

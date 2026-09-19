@@ -216,6 +216,16 @@ def is_protected_resolved(resolved: str, *, extra_protected: tuple[Path, ...] = 
     return _deny_index(extra_protected).covers(_key(resolved))
 
 
+def deny_index_keys(extra_protected: tuple[Path, ...] = ()) -> tuple[str, tuple[str, ...]]:
+    """The current deny index as plain data: (home key, prefix keys).
+
+    For an out-of-process walker to *prune* with. It is a snapshot and a
+    convenience, not a delegation: whatever such a walker reports must still
+    go through ``is_protected`` here before it is used."""
+    index = _deny_index(extra_protected)
+    return index.home, index.prefixes
+
+
 def is_within_allowed_roots(path: Path, allowed_roots: tuple[Path, ...]) -> bool:
     """Defense in depth: a candidate must live under one of the roots that
     were actually scanned, never somewhere the scanner never visited."""

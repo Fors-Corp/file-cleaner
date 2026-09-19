@@ -37,8 +37,8 @@ from pathlib import Path
 from typing import Any
 
 from filecleaner import config as config_mod
+from filecleaner import native_walk, safety
 from filecleaner import rules as rules_mod
-from filecleaner import safety
 from filecleaner.models import Candidate, Rule, ScanResult
 from filecleaner.volumes import default_scan_roots
 
@@ -196,6 +196,11 @@ class _ScanCounter:
         with self._lock:
             self.done += 1
 
+    def advance_to(self, done: int) -> None:
+        """For a walker that counts for itself and reports a running total."""
+        with self._lock:
+            self.done = max(self.done, done)
+
     def percent(self) -> float | None:
         if not self.total:
             return None
@@ -231,13 +236,17 @@ class _WalkContext:
         self.dirs_seen += 1
         self.counter.increment()
         if self.progress is not None and self.dirs_seen % _PROGRESS_EVERY_DIRS == 0:
-            message = f"{self.rule.label}: scanning {rel or '.'}"
-            percent = self.counter.percent()
-            if percent is None:
-                # No counting pre-pass to measure against: say how far the
-                # walk has got instead, so progress is still visibly live.
-                message = f"{self.counter.done:,} folders · {message}"
-            self.progress(message, percent)
+            _report_walking(self.progress, self.rule, rel, self.counter)
+
+
+def _report_walking(progress: ProgressCallback, rule: Rule, rel: str, counter: _ScanCounter) -> None:
+    message = f"{rule.label}: scanning {rel or '.'}"
+    percent = counter.percent()
+    if percent is None:
+        # No counting pre-pass to measure against: say how far the walk has
+        # got instead, so progress is still visibly live.
+        message = f"{counter.done:,} folders · {message}"
+    progress(message, percent)
 
 
 def _iter_dir(path: str) -> Iterator[os.DirEntry[str]]:
@@ -317,22 +326,24 @@ def _emit(ctx: _WalkContext, path: Path, *, is_dir: bool) -> None:
         mtime = max(st.st_mtime, newest_mtime)
     else:
         size, mtime = st.st_size, st.st_mtime
+    candidate = _candidate(ctx.rule, path, is_dir=is_dir, size=size, mtime=mtime, now=ctx.now)
+    if candidate is not None:
+        ctx.result.candidates.append(candidate)
 
-    age_days = (ctx.now - mtime) / 86400
-    if age_days < ctx.rule.min_age_days:
-        return
-    if size < ctx.rule.min_size_bytes:
-        return
-    ctx.result.candidates.append(
-        Candidate(
-            path=path,
-            size_bytes=size,
-            is_dir=is_dir,
-            mtime=mtime,
-            rule_id=ctx.rule.id,
-            category=ctx.rule.category,
-            risk=ctx.rule.risk,
-        )
+
+def _candidate(rule: Rule, path: Path, *, is_dir: bool, size: int, mtime: float, now: float) -> Candidate | None:
+    """A match becomes a candidate only if it clears the rule's thresholds."""
+    age_days = (now - mtime) / 86400
+    if age_days < rule.min_age_days or size < rule.min_size_bytes:
+        return None
+    return Candidate(
+        path=path,
+        size_bytes=size,
+        is_dir=is_dir,
+        mtime=mtime,
+        rule_id=rule.id,
+        category=rule.category,
+        risk=rule.risk,
     )
 
 
@@ -479,6 +490,66 @@ def _locked_progress(progress: ProgressCallback) -> ProgressCallback:
     return wrapped
 
 
+def _run_targets_native(
+    targets: list[tuple[Rule, Path]],
+    extra_protected: tuple[Path, ...],
+    *,
+    progress: ProgressCallback | None,
+    counter: _ScanCounter,
+) -> tuple[list[Candidate], list[str]] | None:
+    """The same walks as the Python path below, run by the native helper
+    (see ``native_walk``). None when there is no helper or it failed, in
+    which case the caller walks in Python.
+
+    The helper is an accelerator, not an authority: the deny index it is
+    given only lets it prune, and every path it reports is checked here —
+    inside the walk's own root, and against the authoritative, resolving
+    ``safety.is_protected`` — before it can become a candidate."""
+    walks: list[native_walk.Walk] = []
+    owners: list[Rule] = []
+    for rule, base in targets:
+        for pattern in rule.include_globs:
+            walks.append(native_walk.Walk(str(base), pattern, rule.kind, tuple(rule.exclude_globs)))
+            owners.append(rule)
+
+    def on_progress(done: int, walk: int, rel: str) -> None:
+        counter.advance_to(done)
+        if progress is not None and 0 <= walk < len(owners):
+            _report_walking(progress, owners[walk], rel, counter)
+
+    deny_home, deny_prefixes = safety.deny_index_keys(extra_protected)
+    outcome = native_walk.scan(
+        walks,
+        deny_home=deny_home,
+        deny_prefixes=deny_prefixes,
+        never_descend=sorted(_NEVER_DESCEND),
+        on_progress=on_progress,
+    )
+    if outcome is None:
+        return None
+    counter.advance_to(outcome.dirs)
+
+    now = time.time()
+    candidates: list[Candidate] = []
+    for match in sorted(outcome.matches, key=lambda m: (m.walk, m.path)):
+        walk_root = walks[match.walk].base.rstrip("/")
+        if not match.path.startswith(walk_root + "/"):
+            continue
+        path = Path(match.path)
+        if safety.is_protected(path, extra_protected=extra_protected):
+            continue
+        candidate = _candidate(
+            owners[match.walk], path, is_dir=match.is_dir, size=match.size, mtime=match.mtime, now=now
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    errors = [
+        f"{owners[e.walk].id}: cannot read {e.path}: {os.strerror(e.errno) if e.errno else 'unknown error'}"
+        for e in sorted(outcome.errors, key=lambda e: (e.walk, e.path))
+    ]
+    return candidates, errors[:_MAX_ERRORS]
+
+
 def _run_targets(
     targets: list[tuple[Rule, Path]],
     extra_protected: tuple[Path, ...],
@@ -498,6 +569,10 @@ def _run_targets(
     if not targets:
         return [], []
     locked_progress = _locked_progress(progress) if progress is not None else None
+    if not count_only:
+        native = _run_targets_native(targets, extra_protected, progress=locked_progress, counter=counter)
+        if native is not None:
+            return native
 
     def _run_one(rule: Rule, root: Path) -> ScanResult:
         if locked_progress is not None:
