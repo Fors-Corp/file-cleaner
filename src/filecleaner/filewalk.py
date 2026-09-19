@@ -19,22 +19,66 @@ import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
-from filecleaner import safety
+from filecleaner import native_walk, safety
 
 FileIdentity = tuple[int, int]
+
+
+class FileStat(NamedTuple):
+    """The two facts callers need about a file, under ``os.stat_result``'s
+    names for them."""
+
+    st_size: int
+    st_mtime: float
 
 
 def identity(st: os.stat_result) -> FileIdentity:
     return (st.st_dev, st.st_ino)
 
 
+def _walk_natively(
+    roots: list[Path], extra_protected: tuple[Path, ...], min_size: int
+) -> list[tuple[Path, FileStat]] | None:
+    """The same walk, done by the native helper (see ``native_walk``). None
+    when there is no helper or it failed, and the caller walks in Python.
+
+    The helper is an accelerator, not an authority, so what it reports is
+    checked here: a file must lie under the root it claims, and the deny-list
+    is applied again in Python rather than taken on trust. (The helper never
+    follows a symlink below a root, so a file's resolved path is its root's
+    resolved path plus the rest — which is what lets that re-check run with
+    no filesystem access, 860k files in well under a second.) Telling two
+    *names of one file* apart is NOT delegated at all where it matters: see
+    ``duplicates.find_duplicates`` and ``duplicates.select_deletions``."""
+    deny_home, deny_prefixes = safety.deny_index_keys(extra_protected)
+    spelled = [str(root) for root in roots]
+    found = native_walk.files(spelled, min_size=min_size, deny_home=deny_home, deny_prefixes=deny_prefixes)
+    if found is None:
+        return None
+    resolved = [os.path.realpath(root).rstrip("/") for root in spelled]
+    inside = [root.rstrip("/") + "/" for root in spelled]
+    checked: list[tuple[Path, FileStat]] = []
+    for item in found:
+        if not item.path.startswith(inside[item.root]) or item.size < min_size:
+            continue
+        resolved_path = resolved[item.root] + "/" + item.path[len(inside[item.root]) :]
+        if safety.is_protected_resolved(resolved_path, extra_protected=extra_protected):
+            continue
+        checked.append((Path(item.path), FileStat(item.size, item.mtime)))
+    return checked
+
+
 def walk_unique_files(
-    roots: list[Path], *, extra_protected: tuple[Path, ...] = ()
-) -> Iterator[tuple[Path, os.stat_result]]:
-    """Yield ``(path, lstat result)`` for every regular file under ``roots``,
-    once per physical file, under the first path that reaches it. Symlinks
-    are never followed and protected directories are pruned.
+    roots: list[Path], *, extra_protected: tuple[Path, ...] = (), min_size: int = 0
+) -> Iterator[tuple[Path, FileStat]]:
+    """Yield ``(path, FileStat)`` for every regular file of at least
+    ``min_size`` bytes under ``roots``, once per physical file. Symlinks are
+    never followed and protected directories are pruned.
+
+    Which of a hard-linked file's names is reported is unspecified (the
+    Python walk gives the first it meets, the native helper the smallest).
 
     A file with a single link lives in exactly one directory, so it can only
     be reached twice by visiting that directory twice: remembering the
@@ -45,6 +89,11 @@ def walk_unique_files(
     A filesystem that reports no inode numbers collapses to one identity per
     device here, which under-reports files rather than double-counting them.
     """
+    native = _walk_natively(roots, extra_protected, min_size)
+    if native is not None:
+        yield from native
+        return
+
     seen_dirs: set[FileIdentity] = set()
     seen_hard_links: set[FileIdentity] = set()
     for root in roots:
@@ -75,4 +124,5 @@ def walk_unique_files(
                     if file_id in seen_hard_links:
                         continue
                     seen_hard_links.add(file_id)
-                yield file_path, st
+                if st.st_size >= min_size:
+                    yield file_path, FileStat(st.st_size, st.st_mtime)

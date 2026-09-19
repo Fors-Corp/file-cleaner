@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from filecleaner import native_walk, safety, scanner
+from filecleaner import duplicates, filewalk, largefiles, native_walk, safety, scanner
 
 _REPO = Path(__file__).resolve().parent.parent
 _RULES = [
@@ -191,6 +191,75 @@ class TestUntrustedHelper:
         assert ("2,048 folders · logfiles: scanning projects/app", None) in seen
 
 
+class TestUntrustedFileWalk:
+    """The same boundary for the `files` walk behind duplicates/large-files."""
+
+    @staticmethod
+    def _helper_claiming(tmp_path, monkeypatch, claims):
+        lines = [*claims, {"done": len(claims)}]
+        monkeypatch.setenv(native_walk.HELPER_ENV, str(_fake_helper(tmp_path, _emit_lines(lines))))
+
+    def test_one_file_reported_under_two_names_is_not_a_duplicate(
+        self, sandbox_config, sandbox_home, tmp_path, monkeypatch
+    ):
+        """The bug 1.5.2 fixed, replayed by a helper that fails to tell one
+        file from two. Python still decides what a duplicate is."""
+        docs = sandbox_home / "Docs"
+        docs.mkdir()
+        only = docs / "only-copy.bin"
+        only.write_bytes(b"z" * 5000)
+        alias = sandbox_home / "docs-alias"
+        alias.symlink_to(docs)
+        self._helper_claiming(
+            tmp_path,
+            monkeypatch,
+            [
+                {"f": str(only), "r": 0, "s": 5000, "t": 1.0},
+                {"f": str(alias / "only-copy.bin"), "r": 0, "s": 5000, "t": 1.0},
+            ],
+        )
+
+        groups = duplicates.find_duplicates([sandbox_home], sandbox_config, min_size_bytes=1)
+
+        assert groups == []
+        assert only.read_bytes() == b"z" * 5000
+
+    def test_files_outside_the_roots_or_in_protected_places_are_dropped(
+        self, sandbox_config, sandbox_home, tmp_path, monkeypatch
+    ):
+        _tree(sandbox_home)
+        honest = sandbox_home / "projects" / "app" / "junk" / "a.bin"
+        self._helper_claiming(
+            tmp_path,
+            monkeypatch,
+            [
+                {"f": str(sandbox_home / ".ssh" / "debug.log"), "r": 0, "s": 6, "t": 1.0},
+                {"f": str(sandbox_home / "Library" / "Mail" / "mail.log"), "r": 0, "s": 6, "t": 1.0},
+                {"f": "/etc/hosts", "r": 0, "s": 6, "t": 1.0},
+                {"f": str(sandbox_home.parent / "elsewhere.bin"), "r": 0, "s": 6, "t": 1.0},
+                {"f": str(honest), "r": 0, "s": 1, "t": 1.0},  # under-reports its size ...
+                {"f": str(honest), "r": 0, "s": 300, "t": 1.0},
+            ],
+        )
+
+        found = list(filewalk.walk_unique_files([sandbox_home], min_size=100))
+
+        assert found == [(honest, filewalk.FileStat(300, 1.0))]  # ... and the min-size floor is Python's too
+
+    @pytest.mark.parametrize(
+        "body", ["sys.exit(3)", "print('not json')", 'print(json.dumps({"f": "/x", "r": 7, "s": 1, "t": 1.0})); print(json.dumps({"done": 1}))']
+    )
+    def test_a_broken_helper_falls_back_to_the_python_walk(self, sandbox_home, tmp_path, monkeypatch, body):
+        _tree(sandbox_home)
+        monkeypatch.setenv(native_walk.HELPER_ENV, "0")
+        expected = sorted(filewalk.walk_unique_files([sandbox_home]))
+        assert expected
+
+        monkeypatch.setenv(native_walk.HELPER_ENV, str(_fake_helper(tmp_path, body)))
+        with pytest.warns(RuntimeWarning, match="falling back to the Python walker"):
+            assert sorted(filewalk.walk_unique_files([sandbox_home])) == expected
+
+
 # --------------------------------------------------------------------------
 # The real helper against the reference implementation
 # --------------------------------------------------------------------------
@@ -269,3 +338,48 @@ class TestAgainstThePythonWalker:
         out = subprocess.run([str(_HELPER)], input=json.dumps(request), capture_output=True, text=True)
         assert out.returncode != 0
         assert "unknown kind" in out.stderr
+
+
+    def test_file_walk_matches_the_python_walk(self, sandbox_config, sandbox_home, tmp_path, monkeypatch):
+        """Every way one file can be reached twice, plus the things that are
+        not files to compare — against the Python walk, by physical identity
+        (which of a hard link's names is reported is unspecified)."""
+        _tree(sandbox_home)
+        app = sandbox_home / "projects" / "app"
+        os.link(app / "build.log", app / "build-hardlink.log")
+        os.mkfifo(app / "a-fifo")
+        (sandbox_home / "alias-of-projects").symlink_to(sandbox_home / "projects")
+        roots = [sandbox_home, sandbox_home / "projects", sandbox_home / "alias-of-projects"]
+        if (sandbox_home / "PROJECTS").exists():  # case-insensitive filesystem
+            roots.append(sandbox_home / "PROJECTS")
+
+        def walk(min_size):
+            found = list(filewalk.walk_unique_files(roots, min_size=min_size))
+            ids = [(os.lstat(p).st_dev, os.lstat(p).st_ino) for p, _ in found]
+            assert len(ids) == len(set(ids)), "a physical file was reported twice"
+            return {i: (st.st_size, round(st.st_mtime, 3)) for i, (_, st) in zip(ids, found, strict=True)}
+
+        for min_size in (0, 11, 301):
+            monkeypatch.setenv(native_walk.HELPER_ENV, "0")
+            reference = walk(min_size)
+            monkeypatch.setenv(native_walk.HELPER_ENV, str(_HELPER))
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")  # a silent fallback would make this vacuous
+                assert walk(min_size) == reference
+        assert reference  # the >=301-byte pass still found junk/deep/b.bin
+        monkeypatch.setenv(native_walk.HELPER_ENV, str(_HELPER))
+        names = {p.name for p, _ in filewalk.walk_unique_files(roots)}
+        assert "a-fifo" not in names and "debug.log" not in names and "mail.log" not in names
+
+    def test_duplicates_and_large_files_agree_across_walkers(self, sandbox_config, sandbox_home, monkeypatch):
+        _tree(sandbox_home)
+        (sandbox_home / "copy-of-a.bin").write_bytes(b"x" * 300)  # a genuine duplicate of junk/a.bin
+        results = {}
+        for label, env in (("python", "0"), ("native", str(_HELPER))):
+            monkeypatch.setenv(native_walk.HELPER_ENV, env)
+            groups = duplicates.find_duplicates([sandbox_home], sandbox_config, min_size_bytes=100)
+            large = largefiles.find_large_files([sandbox_home], sandbox_config, top=5, min_size_bytes=100)
+            results[label] = ([(g.sha256, g.size_bytes, g.paths) for g in groups], [(f.path, f.size_bytes) for f in large])
+
+        assert results["native"] == results["python"]
+        assert [len(paths) for _, _, paths in results["native"][0]] == [2]

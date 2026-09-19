@@ -63,7 +63,9 @@ def find_duplicates(
 
     size_buckets: dict[int, list[Path]] = {}
     files_seen = 0
-    for file_path, st in filewalk.walk_unique_files(roots, extra_protected=extra_protected):
+    for file_path, st in filewalk.walk_unique_files(
+        roots, extra_protected=extra_protected, min_size=min_size_bytes
+    ):
         files_seen += 1
         if progress is not None and files_seen % _PROGRESS_EVERY_FILES == 0:
             progress(f"scanned {files_seen} files, comparing sizes…")
@@ -107,8 +109,9 @@ def find_duplicates(
     groups: list[DuplicateGroup] = []
     for size, full_buckets in full_hashes_by_size.items():
         for full_hash, group_paths in full_buckets.items():
-            if len(group_paths) > 1:
-                groups.append(DuplicateGroup(sha256=full_hash, size_bytes=size, paths=sorted(group_paths)))
+            distinct = _distinct_files(group_paths)
+            if len(distinct) > 1:
+                groups.append(DuplicateGroup(sha256=full_hash, size_bytes=size, paths=distinct))
 
     groups.sort(key=lambda g: (g.wasted_bytes, g.sha256), reverse=True)
     if max_groups:
@@ -117,6 +120,26 @@ def find_duplicates(
 
 
 KEEP_STRATEGIES = ("oldest", "newest", "shortest-path")
+
+
+def _distinct_files(paths: list[Path]) -> list[Path]:
+    """``paths`` sorted, keeping one path per physical file.
+
+    ``filewalk`` already visits each file once, so this normally removes
+    nothing. It is here because "these are two different files" is the
+    claim a permanent delete rests on, and it should not rest on the walk
+    alone — least of all when the walk was done by the native helper, whose
+    word is not taken for anything that matters. It costs one ``stat`` per
+    member of a finished group, which is next to nothing."""
+    distinct: list[Path] = []
+    seen: set[filewalk.FileIdentity] = set()
+    for path in sorted(paths):
+        file_id = _identity_of(path)
+        if file_id is None or file_id in seen:
+            continue
+        seen.add(file_id)
+        distinct.append(path)
+    return distinct
 
 
 def _identity_of(path: Path) -> filewalk.FileIdentity | None:

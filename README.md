@@ -32,8 +32,10 @@ Requires Python 3.11+ and macOS. Also runnable as `python -m filecleaner`.
 ### Optional: the native scan walker
 
 If a Rust toolchain (`cargo`) is on your `PATH`, `install.sh` also builds `fclean-walk`, a
-small native helper that does the scan's directory walk. It is several times faster on a
-large tree (a whole-home scan of ~336k folders: about 15 s instead of about 75 s) because
+small native helper that does the directory walk for `scan`, `duplicates` and `large-files`.
+It is several times faster on a large tree (a whole-home `scan` of ~336k folders: about 15 s
+instead of about 75 s; the file walk behind `duplicates`, 3.2M files: about 28 s instead of
+about 230 s) because
 it lists directories on every core at once, walks the tree once for rules that start in the
 same place, and sizes matched folders with macOS's bulk `getattrlistbulk(2)` call instead
 of one `lstat` per file. Results are identical; it only changes how long you wait.
@@ -42,7 +44,10 @@ It is strictly optional and strictly an accelerator. Without it File Cleaner beh
 same and walks in Python; if the helper ever fails, the scan warns and falls back to Python.
 The helper is only ever loaded from inside the installed package (or from the path in
 `FCLEAN_NATIVE_WALK`), never from `PATH`, and the scanner re-checks every path it reports
-against the deny-list before using it. Set `FCLEAN_NATIVE_WALK=0` to force the Python walker.
+against the deny-list before using it. For `duplicates`, what counts as a duplicate is still
+decided in Python: it hashes the files itself and checks that they really are different
+physical files. Set `FCLEAN_NATIVE_WALK=0` to force the Python walker. After updating File
+Cleaner, re-run `./install.sh` so the helper is rebuilt to match.
 
 ## Quick start
 
