@@ -35,6 +35,8 @@ use serde::Deserialize;
 use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
 
+mod safety;
+
 const PROGRESS_EVERY_DIRS: u64 = 1024;
 
 // ------------------------------------------------------------------ request
@@ -57,6 +59,14 @@ struct WalkSpec {
     kind: String,
     #[serde(default)]
     excludes: Vec<String>,
+    // Only the native `scan` uses these; the streaming walk leaves rule
+    // thresholds to its caller.
+    #[serde(default)]
+    rule_id: String,
+    #[serde(default)]
+    min_age_days: f64,
+    #[serde(default)]
+    min_size_bytes: u64,
 }
 
 // --------------------------------------------------------------------- glob
@@ -141,7 +151,7 @@ impl Glob {
 // --------------------------------------------------------------------- deny
 
 /// `safety._key`: Unicode canonical caseless matching, NFD(casefold(NFD(s))).
-fn key(s: &str) -> String {
+pub fn key(s: &str) -> String {
     if s.is_ascii() {
         return s.to_ascii_lowercase();
     }
@@ -149,14 +159,16 @@ fn key(s: &str) -> String {
     caseless::default_case_fold_str(&decomposed).nfd().collect()
 }
 
-/// `safety._DenyIndex`, received ready-made: Python owns how it is built.
-struct Deny {
+/// `safety._DenyIndex`: received ready-made from Python by the streaming
+/// walk, built natively (`safety::build_index`) by `scan` and `protected`.
+#[derive(Clone)]
+pub struct Deny {
     home: String,
     prefixes: Vec<String>,
 }
 
 impl Deny {
-    fn covers(&self, resolved: &str) -> bool {
+    pub fn covers(&self, resolved: &str) -> bool {
         let mut probe = key(resolved);
         if probe == self.home {
             return true;
@@ -340,11 +352,28 @@ impl Walk {
     }
 }
 
+struct Hit {
+    walk: usize,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    mtime: f64,
+}
+
+/// Where matches go: streamed to the caller as they are found (the helper
+/// protocol), or gathered for the native `scan` to finish the job itself.
+#[derive(Default)]
+struct Gathered {
+    hits: Vec<Hit>,
+    read_errors: Vec<(usize, String, i32)>,
+}
+
 struct Ctx {
     deny: Deny,
     never_descend: Vec<String>,
     out: Mutex<BufWriter<io::Stdout>>,
     dirs: AtomicU64,
+    gather: Option<Mutex<Gathered>>,
 }
 
 impl Ctx {
@@ -358,9 +387,28 @@ impl Ctx {
         }
     }
 
+    fn hit(&self, hit: Hit) {
+        match &self.gather {
+            Some(gathered) => gathered.lock().unwrap_or_else(|e| e.into_inner()).hits.push(hit),
+            None => self.send(
+                json!({"m": hit.walk, "p": hit.path, "d": hit.is_dir, "s": hit.size, "t": hit.mtime}),
+                false,
+            ),
+        }
+    }
+
+    fn read_error(&self, walk: usize, dir: &str, errno: i32) {
+        match &self.gather {
+            Some(gathered) => {
+                gathered.lock().unwrap_or_else(|e| e.into_inner()).read_errors.push((walk, dir.to_owned(), errno))
+            }
+            None => self.send(json!({"e": walk, "p": dir, "errno": errno}), false),
+        }
+    }
+
     fn tick(&self, walk: &Walk, rel: &str) {
         let done = self.dirs.fetch_add(1, Ordering::Relaxed) + 1;
-        if done % PROGRESS_EVERY_DIRS == 0 {
+        if self.gather.is_none() && done % PROGRESS_EVERY_DIRS == 0 {
             self.send(json!({"n": done, "w": walk.index, "r": rel}), true);
         }
     }
@@ -428,7 +476,7 @@ fn emit(ctx: &Ctx, walk: &Walk, path: &str, is_dir: bool) {
     let own = mtime_nanos(&meta);
     let (size, newest) = if is_dir { dir_stats(path, own) } else { (meta.len(), own) };
     let mtime = newest.max(own) as f64 / 1e9;
-    ctx.send(json!({"m": walk.index, "p": path, "d": is_dir, "s": size, "t": mtime}), false);
+    ctx.hit(Hit { walk: walk.index, path: path.to_owned(), is_dir, size, mtime });
 }
 
 /// One traversal serves every walk in `active`. Walks that start in the same
@@ -451,7 +499,7 @@ fn visit<'s>(
         Ok(entries) => entries,
         Err(err) => {
             for walk in &active {
-                ctx.send(json!({"e": walk.index, "p": dir, "errno": err.raw_os_error().unwrap_or(0)}), false);
+                ctx.read_error(walk.index, &dir, err.raw_os_error().unwrap_or(0));
             }
             return;
         }
@@ -707,10 +755,31 @@ fn main() {
         return;
     }
 
+    match std::env::args().nth(1).as_deref() {
+        Some("deny-lists") => return deny_lists_main(),
+        Some("protected") => return protected_main(&input),
+        Some("scan") => return scan_main(&input),
+        _ => {}
+    }
+
     let request: Request =
         serde_json::from_str(&input).unwrap_or_else(|err| fail(format!("bad request: {err}")));
-    let mut walks = Vec::with_capacity(request.walks.len());
-    for (index, spec) in request.walks.iter().enumerate() {
+    let walks = compile_walks(&request.walks);
+    start_pool(request.threads);
+    let ctx = Ctx {
+        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes },
+        never_descend: request.never_descend,
+        out: Mutex::new(BufWriter::new(io::stdout())),
+        dirs: AtomicU64::new(0),
+        gather: None,
+    };
+    run_walks(&ctx, &walks);
+    ctx.send(json!({"done": ctx.dirs.load(Ordering::Relaxed)}), true);
+}
+
+fn compile_walks(specs: &[WalkSpec]) -> Vec<Walk> {
+    let mut walks = Vec::with_capacity(specs.len());
+    for (index, spec) in specs.iter().enumerate() {
         if spec.kind != "dir" && spec.kind != "file" {
             fail(format!("walk {index}: unknown kind {:?}", spec.kind));
         }
@@ -724,23 +793,22 @@ fn main() {
             .unwrap_or_else(|err| fail(format!("walk {index}: exclude: {err}")));
         walks.push(Walk { index, base: PathBuf::from(&spec.base), matcher, excludes, kind: spec.kind.clone() });
     }
+    walks
+}
 
+fn start_pool(threads: usize) {
     let mut pool = rayon::ThreadPoolBuilder::new();
-    if request.threads > 0 {
-        pool = pool.num_threads(request.threads);
+    if threads > 0 {
+        pool = pool.num_threads(threads);
     }
     if let Err(err) = pool.build_global() {
         fail(format!("cannot start thread pool: {err}"));
     }
+}
 
-    let ctx = Ctx {
-        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes },
-        never_descend: request.never_descend,
-        out: Mutex::new(BufWriter::new(io::stdout())),
-        dirs: AtomicU64::new(0),
-    };
+fn run_walks(ctx: &Ctx, walks: &[Walk]) {
     let mut groups: Vec<Vec<&Walk>> = Vec::new();
-    for walk in &walks {
+    for walk in walks {
         let same_start = |g: &&mut Vec<&Walk>| {
             g[0].base == walk.base && g[0].matcher.static_prefix == walk.matcher.static_prefix
         };
@@ -751,11 +819,170 @@ fn main() {
     }
     rayon::scope(|scope| {
         for group in groups {
-            let ctx = &ctx;
             scope.spawn(move |s| start(s, ctx, group));
         }
     });
-    ctx.send(json!({"done": ctx.dirs.load(Ordering::Relaxed)}), true);
+}
+
+// ------------------------------------------------- the port (docs/PORT.md)
+// Phase 1: the deny-list and the scan, with no Python in the loop. The
+// streaming protocol above is what production uses; these exist so the port
+// can be proven against the Python reference before anything depends on it.
+
+#[derive(Deserialize)]
+struct EnvSpec {
+    home: String,
+    #[serde(default = "default_volumes_dir")]
+    volumes_dir: String,
+    #[serde(default)]
+    self_dirs: Vec<String>,
+}
+
+fn default_volumes_dir() -> String {
+    "/Volumes".to_owned()
+}
+
+impl EnvSpec {
+    fn environment(&self) -> safety::Environment {
+        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(str::to_owned)).unwrap_or_else(|| "/".into());
+        safety::Environment {
+            home: self.home.clone(),
+            volumes_dir: self.volumes_dir.clone(),
+            self_dirs: self.self_dirs.clone(),
+            cwd,
+        }
+    }
+}
+
+fn deny_lists_main() {
+    let lists = json!({
+        "absolute": safety::ABSOLUTE_DENY_PATHS,
+        "relative": safety::RELATIVE_DENY_SUBPATHS,
+        "home": safety::HOME_DENY_SUBPATHS,
+    });
+    println!("{lists}");
+}
+
+#[derive(Deserialize)]
+struct ProtectedQuery {
+    path: String,
+    #[serde(default)]
+    extra_protected: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ProtectedRequest {
+    #[serde(flatten)]
+    env: EnvSpec,
+    queries: Vec<ProtectedQuery>,
+}
+
+/// `safety.is_protected` for a batch of paths -> a JSON array of verdicts.
+fn protected_main(input: &str) {
+    let request: ProtectedRequest =
+        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad protected request: {err}")));
+    let env = request.env.environment();
+    let mut indexes: HashMap<Vec<String>, Deny> = HashMap::new();
+    let verdicts: Vec<bool> = request
+        .queries
+        .iter()
+        .map(|query| {
+            let index = indexes
+                .entry(query.extra_protected.clone())
+                .or_insert_with(|| safety::build_index(&env, &query.extra_protected));
+            safety::is_protected(&query.path, index, &env.cwd)
+        })
+        .collect();
+    let verdicts = serde_json::to_string(&verdicts).unwrap_or_else(|err| fail(format!("cannot report: {err}")));
+    println!("{verdicts}");
+}
+
+#[derive(Deserialize)]
+struct ScanRequest {
+    #[serde(flatten)]
+    env: EnvSpec,
+    #[serde(default)]
+    threads: usize,
+    #[serde(default)]
+    extra_protected: Vec<String>,
+    #[serde(default)]
+    never_descend: Vec<String>,
+    now: f64,
+    walks: Vec<WalkSpec>,
+}
+
+fn depth(path: &str) -> usize {
+    path.split('/').filter(|c| !c.is_empty()).count()
+}
+
+/// What `scanner.run_scan` returns: walk, then — natively — the authoritative
+/// protection re-check, the rule thresholds and overlap coalescing.
+fn scan_main(input: &str) {
+    let request: ScanRequest =
+        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad scan request: {err}")));
+    let env = request.env.environment();
+    let index = safety::build_index(&env, &request.extra_protected);
+    let walks = compile_walks(&request.walks);
+    start_pool(request.threads);
+    let ctx = Ctx {
+        deny: index.clone(),
+        never_descend: request.never_descend.clone(),
+        out: Mutex::new(BufWriter::new(io::stdout())),
+        dirs: AtomicU64::new(0),
+        gather: Some(Mutex::new(Gathered::default())),
+    };
+    run_walks(&ctx, &walks);
+    let Gathered { mut hits, mut read_errors } =
+        ctx.gather.as_ref().map(|g| std::mem::take(&mut *g.lock().unwrap_or_else(|e| e.into_inner()))).unwrap_or_default();
+    hits.sort_by(|a, b| (a.walk, &a.path).cmp(&(b.walk, &b.path)));
+    read_errors.sort();
+
+    // A match becomes a candidate only if it is inside its walk's root, is
+    // not protected once fully resolved, and clears its rule's thresholds.
+    let mut candidates: Vec<&Hit> = Vec::new();
+    for hit in &hits {
+        let spec = &request.walks[hit.walk];
+        let inside = format!("{}/", spec.base.trim_end_matches('/'));
+        if !hit.path.starts_with(&inside) || safety::is_protected(&hit.path, &index, &env.cwd) {
+            continue;
+        }
+        let age_days = (request.now - hit.mtime) / 86400.0;
+        if age_days < spec.min_age_days || hit.size < spec.min_size_bytes {
+            continue;
+        }
+        candidates.push(hit);
+    }
+
+    // scanner.coalesce: drop what is nested inside another candidate, and
+    // exact repeats. Shallower wins; at equal depth, the earlier match.
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by_key(|&i| (depth(&candidates[i].path), i));
+    let mut kept: Vec<&Hit> = Vec::new();
+    let mut kept_paths: HashSet<&str> = HashSet::new();
+    let mut overlaps_dropped = 0usize;
+    for i in order {
+        let path = candidates[i].path.as_str();
+        let nested = path.match_indices('/').any(|(at, _)| at > 0 && kept_paths.contains(&path[..at]));
+        if nested || kept_paths.contains(path) {
+            overlaps_dropped += 1;
+            continue;
+        }
+        kept_paths.insert(path);
+        kept.push(candidates[i]);
+    }
+
+    let result = json!({
+        "candidates": kept.iter().map(|h| json!({
+            "path": h.path, "is_dir": h.is_dir, "size": h.size, "mtime": h.mtime,
+            "rule_id": request.walks[h.walk].rule_id,
+        })).collect::<Vec<_>>(),
+        "errors": read_errors.iter().map(|(walk, path, errno)| json!({
+            "rule_id": request.walks[*walk].rule_id, "path": path, "errno": errno,
+        })).collect::<Vec<_>>(),
+        "overlaps_dropped": overlaps_dropped,
+        "dirs": ctx.dirs.load(Ordering::Relaxed),
+    });
+    println!("{result}");
 }
 
 // -------------------------------------------------------------------- tests

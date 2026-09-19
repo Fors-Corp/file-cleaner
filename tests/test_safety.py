@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import unicodedata
 from pathlib import Path
 from typing import Any
 
 import pytest
+from test_native_walk import _HELPER, needs_helper
 
 from filecleaner import safety
 
@@ -91,6 +93,50 @@ def test_table(case: dict[str, Any], in_world: _World) -> None:
     path = Path(in_world.expand(case["path"]))
     extra = tuple(Path(in_world.expand(p)) for p in case.get("extra_protected", ()))
     assert safety.is_protected(path, extra_protected=extra) is case["protected"], case.get("note", "")
+
+
+@needs_helper
+def test_table_holds_for_the_rust_port(in_world: _World) -> None:
+    """The same table, judged by the Rust port of this module (docs/PORT.md,
+    phase 1). One process for all cases; home, volumes directory and the
+    package directory are passed explicitly, since a subprocess cannot be
+    monkeypatched."""
+    cases = [
+        c for c in _CASES if c.get("requires") != "case-insensitive-fs" or in_world.case_insensitive_fs
+    ]
+    request = {
+        "home": str(in_world.home),
+        "volumes_dir": str(in_world.volumes),
+        "self_dirs": [in_world.placeholders["{SELF}"]],
+        "queries": [
+            {
+                "path": in_world.expand(c["path"]),
+                "extra_protected": [in_world.expand(p) for p in c.get("extra_protected", ())],
+            }
+            for c in cases
+        ],
+    }
+    out = subprocess.run(
+        [str(_HELPER), "protected"], input=json.dumps(request), capture_output=True, text=True, check=True,
+        cwd=in_world.home,
+    )
+    verdicts = json.loads(out.stdout)
+
+    assert len(verdicts) == len(cases)
+    wrong = [(_case_id(c), got) for c, got in zip(cases, verdicts, strict=True) if got is not c["protected"]]
+    assert wrong == []
+
+
+@needs_helper
+def test_the_rust_port_carries_the_same_deny_lists() -> None:
+    """Two hand-maintained copies is how deny-lists drift apart. Until the
+    Python one is retired, changing either without the other fails here."""
+    out = subprocess.run([str(_HELPER), "deny-lists"], input="", capture_output=True, text=True, check=True)
+    lists = json.loads(out.stdout)
+
+    assert tuple(lists["absolute"]) == safety.ABSOLUTE_DENY_PATHS
+    assert tuple(lists["relative"]) == safety.RELATIVE_DENY_SUBPATHS
+    assert tuple(lists["home"]) == safety.HOME_DENY_SUBPATHS
 
 
 def test_table_covers_every_deny_entry() -> None:

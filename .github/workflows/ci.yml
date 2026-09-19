@@ -55,7 +55,7 @@ jobs:
       - name: pytest — scanning suites again, through the native walker
         run: >
           FCLEAN_NATIVE_WALK="$PWD/native/fclean-walk/target/release/fclean-walk"
-          pytest --no-cov tests/test_scanner.py tests/test_native_walk.py tests/test_tui.py tests/test_cli.py
+          pytest --no-cov tests/test_scanner.py tests/test_native_walk.py tests/test_tui.py tests/test_cli.py tests/test_port_parity.py
           tests/test_duplicates.py tests/test_largefiles.py
 
       - name: Upload coverage
