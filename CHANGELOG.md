@@ -5,6 +5,130 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-19
+
+### Fixed
+- The organizer classifier's file location was captured in a module-level
+  constant at import time, so it kept pointing at the original
+  `~/.filecleaner` even after the data directory was redirected — the same
+  class of bug 1.0.0 removed from the other path defaults, reintroduced
+  with the classifier in 1.3.0. It is now derived from the data directory
+  at the moment it is asked for.
+
+  In practice this only bit the test suite, but it bit twice: the suite's
+  sandbox redirects the data directory, so the TUI's recategorize test was
+  writing fixture data into the developer's *real* classifier file on every
+  run; and on a machine with no `~/.filecleaner` at all — every CI runner —
+  it failed outright, which is why CI on `main` had been red since 1.3.0.
+
+## [1.5.0] - 2026-09-19
+
+### Added
+- An optional native scan walker, `fclean-walk` (Rust, in
+  `native/fclean-walk`), built by `install.sh` when `cargo` is available.
+  After 1.3.2 a scan was no longer CPU-bound in Python but latency-bound on
+  directory I/O, running on effectively one core — so the win comes from
+  how the filesystem is asked, not from faster instructions:
+  - directory listings fan out across every core (work-stealing), which
+    the Python walk cannot do under the GIL;
+  - rules that start in the same directory (`**/node_modules` and
+    `**/.DS_Store` both start at the scan root) share one traversal instead
+    of each listing the whole tree;
+  - matched directories are sized with macOS's `getattrlistbulk(2)` — name,
+    type, size and mtime for a whole directory per syscall — instead of one
+    `lstat` per file, with the portable path kept as a fallback.
+
+  Measured on a whole-home scan (336k folders, 3.2M entries, 32 GB of
+  matched folders): 74.5 s with the Python walker, 14.9 s with the helper,
+  and the same 329 candidates — identical paths, sizes and rules — and the
+  same read errors.
+- `FCLEAN_NATIVE_WALK`: a path to the helper, or `0` to force the Python
+  walker.
+
+The helper is an accelerator, never an authority. It is optional (no
+toolchain, no helper, no change in behaviour); any failure falls back to
+the Python walker with a warning, never a partial result; it is loaded
+only from inside the package or from `FCLEAN_NATIVE_WALK`, never from
+`PATH`; and the scanner treats what it reports as untrusted — every path
+must lie inside the walk's own root and pass the authoritative, resolving
+deny-list check in Python, and rule thresholds are applied in Python. The
+Python walker remains the reference implementation, and the test suite
+runs the two against each other.
+
+## [1.4.0] - 2026-09-19
+
+### Changed
+- The TUI's scan screen no longer walks the whole tree twice. It used to
+  run a counting pre-pass first ("Estimating scan size…") purely so the
+  status line could show a percentage, which doubled the time to first
+  result. Scan progress now reports a running count of folders scanned
+  (`12,500 folders · Logs: scanning …`) straight from the live scan. The
+  CLI's progress line, which never had a percentage, gains the same count.
+- `scanner.count_total_dirs` and `run_scan(total_dirs=…)` are unchanged
+  and still produce a true percentage for any caller that wants to pay
+  for the second walk; nothing in File Cleaner does so by default now.
+
+## [1.3.2] - 2026-09-19
+
+### Performance
+- Scanning is dramatically faster. Nearly all of a scan's CPU time was
+  going into the deny-list check, which runs for every directory entry:
+  it rebuilt ~30 `pathlib` objects per ancestor via `in path.parents` and
+  re-resolved the home directory, File Cleaner's own install path, every
+  mounted volume and every configured `protected_paths` entry on each
+  call (~570–950 µs per entry, against ~3 µs for the `lstat`).
+  Every deny rule is now flattened once into a tuple of canonical prefixes
+  and cached, so a check is a single `str.startswith` (~0.45 µs). Measured
+  on the same machine with the same harness: `~/Library/Application
+  Support` (505k entries visited) went from 347 s wall / 375 CPU-s to
+  1.7 s wall / 2.4 CPU-s, with identical candidates. The home directory
+  (3.9M entries), which had been taking 58 minutes, now takes about 80
+  seconds — most of which is the kernel's own directory I/O.
+- The walk resolves symlinks once, at its start directory, instead of
+  once per entry. Symlinked entries were already skipped, so everything
+  below a resolved start is resolved by construction and can be checked
+  without touching the filesystem. Paths are still reported exactly as
+  the root was spelled.
+
+The cached index keeps the existing 5-second refresh, so a volume mounted
+mid-scan is still noticed. The check in front of every quarantine move,
+restore and purge is unchanged in strength: it still resolves the path
+itself, every time.
+
+## [1.3.1] - 2026-09-19
+
+### Security
+- The deny-list no longer depends on how a path is spelled. macOS volumes
+  are case-insensitive and Unicode-normalisation-insensitive by default,
+  and `Path.resolve()` only rewrites a component when it is a symlink — so
+  `~/library/mail`, `~/.SSH/id_rsa`, `/system/Library`, or a home directory
+  spelled in NFD all opened the real protected directories while comparing
+  unequal to the deny-list, and were treated as ordinary, movable paths.
+  Both the scan-time filter and the pre-move/restore/purge gate shared the
+  check, so neither caught it. Such a spelling could come from a custom
+  rule's glob prefix (joined as typed), a hand-edited `plan.json`, or a
+  root passed to `duplicates`/`leftovers`. Every deny comparison — absolute
+  paths, per-volume and per-home subpaths, File Cleaner's own code, and
+  `protected_paths` from config — now uses Unicode canonical caseless
+  matching on both sides.
+- A path that cannot be resolved at all is now treated as protected rather
+  than compared unresolved: if it cannot be shown to be safe, it is not
+  touched.
+
+The check is strictly stricter than before, never looser: folding is
+applied even on a case-sensitive volume, where it can only protect more.
+The scanned-roots allow-list is deliberately left case-sensitive, since
+folding an allow-list would loosen it.
+
+### Added
+- `tests/safety_cases.json`: a language-neutral conformance table for the
+  deny-list (370 path/expected pairs plus the fixture tree they need) —
+  case variants of and a symlink into every deny entry, NFC/NFD forms,
+  `..` segments, non-existent tails, the `/etc`–`/private/etc` family,
+  `/tmp`, mounted volumes, dangling and chained symlinks — so a port to
+  another language can run the identical cases. A completeness test fails
+  if a deny entry is added without its rows.
+
 ## [1.3.0] - 2026-09-13
 
 Smart folder reorganization and real permanent deletion for duplicates and

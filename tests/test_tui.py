@@ -37,6 +37,23 @@ async def test_app_launches_and_lists_candidate(cache_item, sandbox_home):
         assert selection_list.option_count == 1
 
 
+async def test_scan_does_not_walk_the_tree_a_second_time(cache_item, sandbox_home, monkeypatch):
+    """The scan screen used to run `count_total_dirs` first — a second full
+    walk — purely to show a percentage. Progress now comes from the scan."""
+    prepasses = []
+    real = tui_mod.scanner.count_total_dirs
+    monkeypatch.setattr(
+        tui_mod.scanner, "count_total_dirs", lambda *a, **kw: prepasses.append(a) or real(*a, **kw)
+    )
+    app = tui_mod.FileCleanerApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        while app.scan_result is None:
+            await pilot.pause()
+        assert app.query_one("#candidates", SelectionList).option_count == 1
+    assert prepasses == []
+
+
 async def test_app_root_param_scopes_scan_to_that_directory(tmp_path, sandbox_home, sandbox_config):
     """Passing root= to FileCleanerApp scopes the scan to that folder,
     matching the CLI's `fclean tui <root>` positional argument."""

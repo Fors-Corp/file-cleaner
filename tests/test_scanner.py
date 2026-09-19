@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from filecleaner import scanner
@@ -326,3 +328,100 @@ class TestRootScoping:
 
         total = scanner.count_total_dirs(sandbox_config, only_rules={"logfiles"}, include_disabled=True, root=scoped)
         assert total >= 1
+
+
+class TestProtectedPathsDuringWalk:
+    """The walk checks the deny-list per entry without touching the
+    filesystem (`safety.is_protected_resolved`), which is only sound because
+    the start directory is resolved first. These pin the cases where the
+    path as typed and the path on disk disagree."""
+
+    @staticmethod
+    def _mail(home):
+        mail = home / "Library" / "Mail" / "V10"
+        mail.mkdir(parents=True)
+        (mail / "msg.emlx").write_bytes(b"x" * 10)
+        logs = home / "Library" / "Logs"
+        logs.mkdir(parents=True)
+        (logs / "app.emlx").write_bytes(b"x" * 10)
+        return mail / "msg.emlx", logs / "app.emlx"
+
+    @staticmethod
+    def _needs_case_insensitive_fs(home):
+        if not (home / "LIBRARY").exists():
+            pytest.skip("needs a case-insensitive filesystem")
+
+    def test_custom_rule_prefix_spelled_in_the_wrong_case(self, sandbox_config, sandbox_home):
+        self._mail(sandbox_home)
+        self._needs_case_insensitive_fs(sandbox_home)
+        sandbox_config["rules"] = [{"id": "sneaky", "include": ["library/mail/**/*.emlx"], "min_age_days": 0}]
+
+        result = scanner.run_scan(sandbox_config, only_rules={"sneaky"}, include_disabled=True)
+
+        assert result.candidates == []
+
+    def test_wrong_case_prefix_above_a_protected_directory(self, sandbox_config, sandbox_home):
+        _protected, ordinary = self._mail(sandbox_home)
+        self._needs_case_insensitive_fs(sandbox_home)
+        sandbox_config["rules"] = [{"id": "sneaky", "include": ["library/**/*.emlx"], "min_age_days": 0}]
+
+        result = scanner.run_scan(sandbox_config, only_rules={"sneaky"}, include_disabled=True)
+
+        # The walk ran (the ordinary file is found, reported as the rule spelled it) ...
+        assert [c.path for c in result.candidates] == [sandbox_home / "library" / "Logs" / ordinary.name]
+        # ... but never entered ~/Library/Mail.
+
+    def test_prefix_through_a_symlinked_ancestor(self, tmp_path, sandbox_config, sandbox_home):
+        self._mail(sandbox_home)
+        box = tmp_path / "box"
+        box.mkdir()
+        (box / "alias").symlink_to(sandbox_home)
+        sandbox_config["rules"] = [{"id": "sneaky", "include": ["alias/Library/**/*.emlx"], "min_age_days": 0}]
+
+        result = scanner.run_scan(sandbox_config, only_rules={"sneaky"}, include_disabled=True, root=box)
+
+        # Reported as typed (through the alias); ~/Library/Mail is recognised
+        # through the alias and skipped.
+        assert [c.path for c in result.candidates] == [box / "alias" / "Library" / "Logs" / "app.emlx"]
+
+
+class TestProgress:
+    @staticmethod
+    def _scan(tmp_path, sandbox_config, monkeypatch, **kwargs):
+        # Per-directory cadence is the Python walker's; the native helper
+        # reports on its own schedule (see test_native_walk.py).
+        monkeypatch.setenv("FCLEAN_NATIVE_WALK", "0")
+        monkeypatch.setattr(scanner, "_PROGRESS_EVERY_DIRS", 1)
+        scoped = tmp_path / "scoped"
+        for name in ("a", "b", "c"):
+            (scoped / name).mkdir(parents=True)
+            (scoped / name / "old.log").write_bytes(b"x")
+        sandbox_config["rules"] = [{"id": "logfiles", "include": ["**/*.log"], "min_age_days": 0}]
+        seen: list[tuple[str, float | None]] = []
+        if kwargs.pop("with_total", False):
+            kwargs["total_dirs"] = scanner.count_total_dirs(
+                sandbox_config, only_rules={"logfiles"}, include_disabled=True, root=scoped
+            )
+        scanner.run_scan(
+            sandbox_config,
+            only_rules={"logfiles"},
+            include_disabled=True,
+            root=scoped,
+            progress=lambda message, percent: seen.append((message, percent)),
+            **kwargs,
+        )
+        return [(m, p) for m, p in seen if "scanning" in m]
+
+    def test_reports_a_running_folder_count_when_no_total_is_known(self, tmp_path, sandbox_config, monkeypatch):
+        walking = self._scan(tmp_path, sandbox_config, monkeypatch)
+
+        assert len(walking) == 4  # scoped + a, b, c
+        assert all(percent is None for _, percent in walking)
+        counts = [int(re.match(r"([\d,]+) folders · ", m).group(1).replace(",", "")) for m, _ in walking]
+        assert counts == [1, 2, 3, 4]
+
+    def test_reports_a_percentage_against_a_counted_total(self, tmp_path, sandbox_config, monkeypatch):
+        walking = self._scan(tmp_path, sandbox_config, monkeypatch, with_total=True)
+
+        assert [percent for _, percent in walking] == [25.0, 50.0, 75.0, 100.0]
+        assert not any("folders ·" in message for message, _ in walking)

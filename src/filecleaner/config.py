@@ -51,7 +51,6 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 DATA_DIR = _data_dir_from_env()
 DEFAULT_QUARANTINE_DIR = DATA_DIR / "quarantine"
 AUDIT_LOG_PATH = DATA_DIR / "audit.log"
-CLASSIFIER_PATH = DATA_DIR / "classifier.json"
 
 # Name of the per-volume quarantine folder created at the root of an
 # external volume when ``volume_local_quarantine`` is on.
@@ -337,7 +336,9 @@ def get_classifier_path() -> Path:
     """Where the local file-organizer classifier's learned weights live —
     never anything but aggregate counts, never a filename or path."""
     ensure_dirs()
-    return CLASSIFIER_PATH
+    # Derived here, not held in a module constant: DATA_DIR can be redirected
+    # after import, and a constant would go on pointing at the old place.
+    return DATA_DIR / "classifier.json"
 
 
 def data_paths_to_protect(config: dict[str, Any]) -> tuple[Path, ...]:

@@ -452,9 +452,10 @@ class FileCleanerApp(App[None]):
             label = f"[{percent:5.1f}%] {message}" if percent is not None else message
             self.call_from_thread(self.query_one("#status", Static).update, Text(label))
 
-        self.call_from_thread(self.query_one("#status", Static).update, Text("Estimating scan size…"))
-        total_dirs = scanner.count_total_dirs(self.config, root=self.root)
-        result = scanner.run_scan(self.config, progress=progress, total_dirs=total_dirs, root=self.root)
+        # No counting pre-pass: it walked the whole tree a second time just to
+        # turn the status line into a percentage. The scan reports a running
+        # folder count as it goes instead.
+        result = scanner.run_scan(self.config, progress=progress, root=self.root)
         audit_mod.log_scan(result)
         self.call_from_thread(self._on_scan_done, result)
 

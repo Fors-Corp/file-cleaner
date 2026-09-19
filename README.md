@@ -29,6 +29,21 @@ export PATH="$(pwd):$PATH"
 
 Requires Python 3.11+ and macOS. Also runnable as `python -m filecleaner`.
 
+### Optional: the native scan walker
+
+If a Rust toolchain (`cargo`) is on your `PATH`, `install.sh` also builds `fclean-walk`, a
+small native helper that does the scan's directory walk. It is several times faster on a
+large tree (a whole-home scan of ~336k folders: about 15 s instead of about 75 s) because
+it lists directories on every core at once, walks the tree once for rules that start in the
+same place, and sizes matched folders with macOS's bulk `getattrlistbulk(2)` call instead
+of one `lstat` per file. Results are identical; it only changes how long you wait.
+
+It is strictly optional and strictly an accelerator. Without it File Cleaner behaves the
+same and walks in Python; if the helper ever fails, the scan warns and falls back to Python.
+The helper is only ever loaded from inside the installed package (or from the path in
+`FCLEAN_NATIVE_WALK`), never from `PATH`, and the scanner re-checks every path it reports
+against the deny-list before using it. Set `FCLEAN_NATIVE_WALK=0` to force the Python walker.
+
 ## Quick start
 
 ```bash
@@ -295,8 +310,8 @@ mouse-only:
 | `q` | Quit |
 
 **Scan** is the original candidate browser: select matches, see live disk usage, and
-confirm before anything moves — a percentage tracks real progress against a quick,
-cheap directory-count pre-pass, not just a spinner. **Rules** lists every builtin and
+confirm before anything moves — a running count of folders scanned shows the scan is
+live, without walking the tree a second time just to compute a percentage. **Rules** lists every builtin and
 custom rule with its category, risk, and effective thresholds; toggling one writes
 straight to `rule_overrides`, and `e` opens a small dialog to override a rule's
 `min_age_days`/`min_size_bytes` without redefining it as a custom rule (leaving a field
@@ -450,6 +465,18 @@ All tests run against synthetic `tmp_path` sandboxes (via `tests/conftest.py`, w
 redirects `Path.home()`, `$HOME`, and every config/data/quarantine path) — never the real
 filesystem, and never require a real iPhone or real MobileSync backups. CI (GitHub Actions,
 `.github/workflows/ci.yml`) runs the same three commands on macOS across Python 3.11–3.13.
+
+The native scan walker lives in `native/fclean-walk` (Rust):
+
+```bash
+cargo test --release --manifest-path native/fclean-walk/Cargo.toml
+cargo build --release --manifest-path native/fclean-walk/Cargo.toml
+```
+
+`tests/test_native_walk.py` runs the built helper against the Python walker — which stays
+the reference implementation — and is skipped if it has not been built. To push the rest of
+the suite through it too: `FCLEAN_NATIVE_WALK="$PWD/native/fclean-walk/target/release/fclean-walk" .venv/bin/pytest`.
+`scanner.glob_to_regex` and the helper's port of it must be kept in step.
 
 ## Architecture, and where this could go next
 
