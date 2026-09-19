@@ -329,8 +329,10 @@ class TestRootScoping:
 
 
 class TestProtectedPathsDuringWalk:
-    """The deny-list has to hold during a walk even when the path as typed
-    and the path on disk disagree (wrong case, or through a symlink)."""
+    """The walk checks the deny-list per entry without touching the
+    filesystem (`safety.is_protected_resolved`), which is only sound because
+    the start directory is resolved first. These pin the cases where the
+    path as typed and the path on disk disagree."""
 
     @staticmethod
     def _mail(home):

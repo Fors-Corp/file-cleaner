@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-09-19
+
+### Performance
+- Scanning is dramatically faster. Nearly all of a scan's CPU time was
+  going into the deny-list check, which runs for every directory entry:
+  it rebuilt ~30 `pathlib` objects per ancestor via `in path.parents` and
+  re-resolved the home directory, File Cleaner's own install path, every
+  mounted volume and every configured `protected_paths` entry on each
+  call (~570–950 µs per entry, against ~3 µs for the `lstat`).
+  Every deny rule is now flattened once into a tuple of canonical prefixes
+  and cached, so a check is a single `str.startswith` (~0.45 µs). Measured
+  on the same machine with the same harness: `~/Library/Application
+  Support` (505k entries visited) went from 347 s wall / 375 CPU-s to
+  1.7 s wall / 2.4 CPU-s, with identical candidates. The home directory
+  (3.9M entries), which had been taking 58 minutes, now takes about 80
+  seconds — most of which is the kernel's own directory I/O.
+- The walk resolves symlinks once, at its start directory, instead of
+  once per entry. Symlinked entries were already skipped, so everything
+  below a resolved start is resolved by construction and can be checked
+  without touching the filesystem. Paths are still reported exactly as
+  the root was spelled.
+
+The cached index keeps the existing 5-second refresh, so a volume mounted
+mid-scan is still noticed. The check in front of every quarantine move,
+restore and purge is unchanged in strength: it still resolves the path
+itself, every time.
+
 ## [1.3.1] - 2026-09-19
 
 ### Security

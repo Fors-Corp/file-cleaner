@@ -9,6 +9,7 @@ only the Python harness for it, plus a few Python-specific checks.
 from __future__ import annotations
 
 import json
+import os
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -132,16 +133,37 @@ def test_symlink_loop_outside_deny_paths_does_not_crash(tmp_path: Path) -> None:
 def test_volume_mounted_mid_run_is_picked_up_after_the_ttl(in_world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
     late = in_world.volumes / "LateMount"
     target = late / "System" / "x"
-    monkeypatch.setattr(safety, "_VOLUME_CACHE_TTL_SECONDS", 3600.0)
+    monkeypatch.setattr(safety, "_DENY_INDEX_TTL_SECONDS", 3600.0)
     safety.reset_caches()
     assert not safety.is_protected(target)
     late.mkdir()
     try:
         assert not safety.is_protected(target)  # the mount list is still cached
-        monkeypatch.setattr(safety, "_VOLUME_CACHE_TTL_SECONDS", 0.0)
+        monkeypatch.setattr(safety, "_DENY_INDEX_TTL_SECONDS", 0.0)
         assert safety.is_protected(target)  # expired -> re-enumerated
     finally:
         late.rmdir()
+
+
+class TestResolvedFastPath:
+    """``is_protected_resolved`` skips the symlink resolution, so it must
+    agree with the authoritative check on every already-resolved path."""
+
+    def test_agrees_with_authoritative_check_on_resolved_paths(self, in_world: _World) -> None:
+        for case in _CASES:
+            if case.get("requires") == "case-insensitive-fs" and not in_world.case_insensitive_fs:
+                continue
+            extra = tuple(Path(in_world.expand(p)) for p in case.get("extra_protected", ()))
+            resolved = os.path.realpath(in_world.expand(case["path"]))
+            assert (
+                safety.is_protected_resolved(resolved, extra_protected=extra) is case["protected"]
+            ), _case_id(case)
+
+    def test_root_directory_children(self, in_world: _World) -> None:
+        assert safety.is_protected_resolved("/System")
+        assert safety.is_protected_resolved("/usr/lib")
+        assert not safety.is_protected_resolved("/")
+        assert not safety.is_protected_resolved("/Users")
 
 
 def test_is_within_allowed_roots(tmp_path: Path) -> None:

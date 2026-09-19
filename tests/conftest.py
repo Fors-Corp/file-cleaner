@@ -13,9 +13,9 @@ from filecleaner import schedule as schedule_mod
 
 @pytest.fixture(autouse=True)
 def _reset_safety_cache():
-    """`safety._volume_roots()` caches mounted volumes briefly for
-    performance; start every test with a clean slate so tests can never
-    observe another test's cached mount state."""
+    """`safety` caches its built deny index (home, mounted volumes, config
+    paths) briefly for performance; start every test with a clean slate so
+    tests can never observe another test's home directory or mount state."""
     safety_mod.reset_caches()
     yield
     safety_mod.reset_caches()

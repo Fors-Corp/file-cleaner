@@ -250,11 +250,22 @@ def _walk_rule_pattern(ctx: _WalkContext) -> None:
         return
     if start_rel and (ctx.is_excluded(start_rel) or safety.is_protected(start, extra_protected=ctx.extra_protected)):
         return
+    # Symlinks are resolved once, here, rather than once per entry. Every
+    # entry below is reached through non-symlink names only (symlinked
+    # entries are skipped), so ``resolved_dir + "/" + name`` is fully
+    # resolved by construction and the deny-list can be checked against it
+    # with no filesystem access. ``dir_path`` stays as the user spelled it:
+    # that is what gets reported. Quarantine re-resolves and re-checks every
+    # candidate before it moves anything.
+    try:
+        resolved_start = str(start.resolve(strict=False)).rstrip("/")  # "" for the root directory
+    except (OSError, RuntimeError):
+        return
 
     start_depth = len(start_rel.split("/")) if start_rel else 0
-    stack: list[tuple[str, str, int]] = [(str(start), start_rel, start_depth)]
+    stack: list[tuple[str, str, str, int]] = [(str(start), resolved_start, start_rel, start_depth)]
     while stack:
-        dir_path, dir_rel, depth = stack.pop()
+        dir_path, resolved_dir, dir_rel, depth = stack.pop()
         ctx.tick(dir_rel)
         try:
             entries = list(_iter_dir(dir_path))
@@ -271,7 +282,8 @@ def _walk_rule_pattern(ctx: _WalkContext) -> None:
                 continue
             if ctx.is_excluded(rel):
                 continue
-            if safety.is_protected(Path(entry.path), extra_protected=ctx.extra_protected):
+            resolved = f"{resolved_dir}/{entry.name}"
+            if safety.is_protected_resolved(resolved, extra_protected=ctx.extra_protected):
                 continue
 
             matched = ctx.matcher.matches(rel)
@@ -283,7 +295,7 @@ def _walk_rule_pattern(ctx: _WalkContext) -> None:
                 if entry.name in _NEVER_DESCEND:
                     continue
                 if ctx.matcher.max_depth is None or depth + 1 < ctx.matcher.max_depth:
-                    stack.append((entry.path, rel, depth + 1))
+                    stack.append((entry.path, resolved, rel, depth + 1))
                 continue
             if matched and ctx.rule.kind == "file" and not ctx.count_only:
                 _emit(ctx, Path(entry.path), is_dir=False)
