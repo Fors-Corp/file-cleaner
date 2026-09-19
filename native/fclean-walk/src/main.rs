@@ -35,7 +35,13 @@ use serde::Deserialize;
 use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
 
+mod config;
+mod pyjson;
+mod pypath;
+mod report;
+mod rules;
 mod safety;
+mod volumes;
 
 const PROGRESS_EVERY_DIRS: u64 = 1024;
 
@@ -53,20 +59,20 @@ struct Request {
 }
 
 #[derive(Deserialize)]
-struct WalkSpec {
-    base: String,
-    pattern: String,
-    kind: String,
+pub struct WalkSpec {
+    pub base: String,
+    pub pattern: String,
+    pub kind: String,
     #[serde(default)]
-    excludes: Vec<String>,
+    pub excludes: Vec<String>,
     // Only the native `scan` uses these; the streaming walk leaves rule
     // thresholds to its caller.
     #[serde(default)]
-    rule_id: String,
+    pub rule_id: String,
     #[serde(default)]
-    min_age_days: f64,
+    pub min_age_days: f64,
     #[serde(default)]
-    min_size_bytes: u64,
+    pub min_size_bytes: u64,
 }
 
 // --------------------------------------------------------------------- glob
@@ -467,12 +473,12 @@ impl Walk {
     }
 }
 
-struct Hit {
-    walk: usize,
-    path: String,
-    is_dir: bool,
-    size: u64,
-    mtime: f64,
+pub struct Hit {
+    pub walk: usize,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub mtime: f64,
 }
 
 /// Where matches go: streamed to the caller as they are found (the helper
@@ -879,7 +885,7 @@ fn sizes_main(input: &str) {
     let _ = out.flush();
 }
 
-fn fail(message: String) -> ! {
+pub fn fail(message: String) -> ! {
     eprintln!("fclean-walk: {message}");
     std::process::exit(2);
 }
@@ -908,6 +914,9 @@ fn main() {
         Some("protected") => return protected_main(&input),
         Some("scan") => return scan_main(&input),
         Some("sizes") => return sizes_main(&input),
+        Some("scan-json") => return report::scan_json_main(&input),
+        Some("config-json") => return report::config_json_main(&input),
+        Some("pyjson") => return report::pyjson_main(&input),
         _ => {}
     }
 
@@ -1066,16 +1075,31 @@ fn depth(path: &str) -> usize {
 
 /// What `scanner.run_scan` returns: walk, then — natively — the authoritative
 /// protection re-check, the rule thresholds and overlap coalescing.
-fn scan_main(input: &str) {
-    let request: ScanRequest =
-        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad scan request: {err}")));
-    let env = request.env.environment();
-    let index = safety::build_index(&env, &request.extra_protected);
-    let walks = compile_walks(&request.walks);
-    start_pool(request.threads);
+/// What a scan found, after everything `scanner.run_scan` does to it.
+pub struct Scanned {
+    pub candidates: Vec<Hit>,
+    /// (walk, directory, errno), by walk and then by path.
+    pub read_errors: Vec<(usize, String, i32)>,
+    pub overlaps_dropped: usize,
+    pub dirs: u64,
+}
+
+/// The whole scan: the walk, then the containment and protection re-check,
+/// the rule thresholds and overlap coalescing.
+pub fn native_scan(
+    env: &safety::Environment,
+    extra_protected: &[String],
+    never_descend: &[String],
+    threads: usize,
+    now: f64,
+    specs: &[WalkSpec],
+) -> Scanned {
+    let index = safety::build_index(env, extra_protected);
+    let walks = compile_walks(specs);
+    start_pool(threads);
     let ctx = Ctx {
         deny: index.clone(),
-        never_descend: request.never_descend.clone(),
+        never_descend: never_descend.to_vec(),
         out: Mutex::new(BufWriter::new(io::stdout())),
         dirs: AtomicU64::new(0),
         gather: Some(Mutex::new(Gathered::default())),
@@ -1088,14 +1112,14 @@ fn scan_main(input: &str) {
 
     // A match becomes a candidate only if it is inside its walk's root, is
     // not protected once fully resolved, and clears its rule's thresholds.
-    let mut candidates: Vec<&Hit> = Vec::new();
-    for hit in &hits {
-        let spec = &request.walks[hit.walk];
+    let mut candidates: Vec<Hit> = Vec::new();
+    for hit in hits {
+        let spec = &specs[hit.walk];
         let inside = format!("{}/", spec.base.trim_end_matches('/'));
         if !hit.path.starts_with(&inside) || safety::is_protected(&hit.path, &index, &env.cwd) {
             continue;
         }
-        let age_days = (request.now - hit.mtime) / 86400.0;
+        let age_days = (now - hit.mtime) / 86400.0;
         if age_days < spec.min_age_days || hit.size < spec.min_size_bytes {
             continue;
         }
@@ -1106,10 +1130,10 @@ fn scan_main(input: &str) {
     // exact repeats. Shallower wins; at equal depth, the earlier match.
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     order.sort_by_key(|&i| (depth(&candidates[i].path), i));
-    let mut kept: Vec<&Hit> = Vec::new();
+    let mut keep = vec![false; candidates.len()];
     let mut kept_paths: HashSet<&str> = HashSet::new();
     let mut overlaps_dropped = 0usize;
-    for i in order {
+    for &i in &order {
         let path = candidates[i].path.as_str();
         let nested = path.match_indices('/').any(|(at, _)| at > 0 && kept_paths.contains(&path[..at]));
         if nested || kept_paths.contains(path) {
@@ -1117,19 +1141,29 @@ fn scan_main(input: &str) {
             continue;
         }
         kept_paths.insert(path);
-        kept.push(candidates[i]);
+        keep[i] = true;
     }
+    let mut slots: Vec<Option<Hit>> = candidates.into_iter().map(Some).collect();
+    let kept = order.into_iter().filter(|&i| keep[i]).filter_map(|i| slots[i].take()).collect();
+    Scanned { candidates: kept, read_errors, overlaps_dropped, dirs: ctx.dirs.load(Ordering::Relaxed) }
+}
 
+fn scan_main(input: &str) {
+    let request: ScanRequest =
+        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad scan request: {err}")));
+    let env = request.env.environment();
+    let scanned =
+        native_scan(&env, &request.extra_protected, &request.never_descend, request.threads, request.now, &request.walks);
     let result = json!({
-        "candidates": kept.iter().map(|h| json!({
+        "candidates": scanned.candidates.iter().map(|h| json!({
             "path": h.path, "is_dir": h.is_dir, "size": h.size, "mtime": h.mtime,
             "rule_id": request.walks[h.walk].rule_id,
         })).collect::<Vec<_>>(),
-        "errors": read_errors.iter().map(|(walk, path, errno)| json!({
+        "errors": scanned.read_errors.iter().map(|(walk, path, errno)| json!({
             "rule_id": request.walks[*walk].rule_id, "path": path, "errno": errno,
         })).collect::<Vec<_>>(),
-        "overlaps_dropped": overlaps_dropped,
-        "dirs": ctx.dirs.load(Ordering::Relaxed),
+        "overlaps_dropped": scanned.overlaps_dropped,
+        "dirs": scanned.dirs,
     });
     println!("{result}");
 }

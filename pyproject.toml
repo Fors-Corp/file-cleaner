@@ -55,6 +55,9 @@ fclean = "filecleaner.cli:_entrypoint"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+filecleaner = ["builtin_rules.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=filecleaner --cov-report=term-missing"

@@ -19,6 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `organize` and the installer clean-up were measured too and left alone:
   they list a single folder and take 0.02 s.
 
+### Changed
+- The builtin rules live in a data file, `builtin_rules.json`, instead of in
+  Python source, so that the Rust port compiles in the very same list. The
+  rules themselves are unchanged (the loaded objects are identical), and the
+  file ships in the wheel.
+
+### Internal
+- Second phase of the Rust port (`docs/PORT.md`): `fclean-walk scan-json` and
+  `config-json` read the config file, the rules and the volumes themselves and
+  print what `fclean scan --json` and `fclean config show --json` print —
+  byte for byte on a real home directory (99,091 bytes) and across a matrix
+  of configs in CI. Still nothing `fclean` runs uses them.
+
 ## [1.6.1] - 2026-09-19
 
 ### Fixed

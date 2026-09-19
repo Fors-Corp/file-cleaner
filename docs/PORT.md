@@ -94,15 +94,62 @@ to create such a name, so this is not reachable on a stock Mac. Stricter.
 The inode-identity oracle was not re-run against Rust: it holds for Python
 (0 violations), and Rust agrees with Python on every path, in both directions.
 
-### Phase 2 — data and configuration
-`models` (395) · `rules` (412) · `config` (445) · `profiles` (89) ·
-`volumes` (136) · `format`/`output` (79).
+### Phase 2 — data and configuration  *(done 2026-09-19)*
+`rules` (412) · `models.Rule`/`Candidate`/`ScanResult` · `config`, reading
+half (445) · `volumes`, scan roots (136) · `output` (34).
 
-Builtin rules move to a data file read by both implementations (single source
-of truth). TOML config with the same keys, defaults, warnings and atomic save.
-`fclean scan --json` and `fclean rules` become fully native.
-*Done when:* `scan --json` output is byte-identical to Python's for the same
-config, across every builtin profile.
+- The builtin rules are a data file, `src/filecleaner/builtin_rules.json`:
+  Python loads it, Rust compiles it in (`include_str!`). One list, two
+  readers. Generated from the tuple it replaced; `repr(BUILTIN_RULES)` hashes
+  the same before and after, and the file is in the built wheel.
+- `fclean-walk scan-json` and `config-json`: config file (same paths and
+  environment variables, defaults, validation and messages), custom rules,
+  selection and threshold overrides, scan roots and volumes, the scan, and
+  the report — what `fclean scan --json` and `fclean config show --json`
+  print, with no Python in the loop.
+- `pyjson.rs` writes `json.dumps(indent=2, ensure_ascii=False)` exactly,
+  including `repr(float)`.
+
+*Done when:* the two reports are byte-identical to Python's, the port having
+read the same config file for itself, across a matrix of configs.
+
+*Result (2026-09-19):*
+
+| Check | Outcome |
+|---|---|
+| JSON writer against `json.dumps`, 200,000 floats and 200,000 strings | identical, 9.0 MB |
+| `config show --json`, real config | identical, 11,481 bytes |
+| `scan --json ~`, real home, read-only | identical, 99,091 bytes (99,426 with `--include-disabled`) |
+| Fixture matrix in CI (`tests/test_port_parity.py`): no config file / a config with custom rules, overrides, thresholds, keep-paths, explicit roots and an unknown key × defaults / `--include-disabled` / `--rules` / `--exclude`; a root that is not home; unreadable folders | identical, every cell |
+| Bad configs and unknown rule ids | refused by both, in the same words |
+
+Two things the gate is *not*: `duration_seconds` is wall-clock time and is
+blanked on both sides; and the reference is Python **with the native walker**,
+whose results come in a defined order (the pure-Python walk yields in
+whatever order the filesystem lists — phase 1 compared against that one, as
+sets).
+
+*What the byte-level gate caught:* `repr(float)`. Rust and Python agree on
+the shortest digits that round-trip except when a double lies exactly halfway
+between two candidates (`827746655.84765625`): Rust rounds half up, Python
+half to even. About one modification time in tens of thousands.
+
+*Corrections to this plan, found while doing it:*
+- There are no builtin profiles, and a scan never reads one: `profile apply`
+  merges a profile into `config.toml`. "Across every builtin profile" became
+  the config matrix above. `profiles`, and the writing half of `config`
+  (atomic save, `config set`/`keep`/`threshold`), move to **phase 5**, with
+  the commands that use them: until the CLI is native nothing native would
+  call them, so there would be nothing to prove them against.
+- There is no `fclean rules`; rules are listed by `fclean config show`.
+
+*Known intentional divergences:* a custom rule whose `label`, `category`,
+`kind`… is not a string is refused (Python applies `str()` to it); `~user`
+paths are refused by name (Python asks the password database); the detail
+after "is not valid TOML:" is the Rust parser's; a TOML datetime under an
+*unknown* key prints in TOML's spelling, not `isoformat()`'s. Unlike Python,
+the port never creates a default `config.toml`, and `scan-json` writes no
+audit-log entry — both arrive with the commands themselves.
 
 ### Phase 3 — read-only commands
 `filewalk` (128, walk already native) · `duplicates` find-only (199) ·
@@ -127,7 +174,9 @@ restore performed by Python of an item quarantined by Rust (and vice versa)
 round-trips.
 
 ### Phase 5 — CLI parity and the flip
-`cli` (1443, 38 commands). Same commands, flags, exit codes and `--json`
+`cli` (1443, 38 commands) · `profiles` (89) · `config`, writing half (atomic
+save, `set`/`keep`/`threshold`) — moved here from phase 2, see there. Same
+commands, flags, exit codes and `--json`
 shapes; `./fclean` starts the Rust binary. Python remains installable as
 `fclean-py` for one minor release as the rollback path.
 
