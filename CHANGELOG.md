@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-09-19
+
+### Added
+- `fclean leftovers` sizes the folders it finds with the native helper (when
+  it is installed): all of them in one batch, across every core, through
+  `getattrlistbulk`. Sizing was 98% of the command's time — 1,037 folders,
+  one `lstat` per file, on one core. On a real home directory: 7.5 s
+  (anywhere from 2.3 to 14.8 s) down to 1.0 s (0.9 to 1.5 s), same 664
+  candidates and sizes. As everywhere else, the helper is optional, its
+  answer is checked (exactly one sane answer per folder, or it is thrown
+  away), and the check made before `apply` still sizes folders in Python.
+  `organize` and the installer clean-up were measured too and left alone:
+  they list a single folder and take 0.02 s.
+
 ## [1.6.1] - 2026-09-19
 
 ### Fixed

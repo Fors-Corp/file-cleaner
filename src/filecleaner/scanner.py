@@ -30,7 +30,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -175,6 +175,19 @@ def dir_stats(path: Path) -> tuple[int, float]:
             if st.st_mtime > newest:
                 newest = st.st_mtime
     return total, newest
+
+
+def dir_stats_many(paths: Sequence[Path]) -> list[tuple[int, float]]:
+    """``dir_stats`` for each of ``paths``, in order. Sizing many folders is
+    latency-bound and single-core in Python, so the native helper does it in
+    parallel when there is one; its numbers are the same ``dir_stats`` would
+    give. Not for ``plan.revalidate``: the check before ``apply`` stays in
+    Python, one directory at a time."""
+    if len(paths) > 1:
+        sized = native_walk.dir_sizes([str(path) for path in paths])
+        if sized is not None:
+            return sized
+    return [dir_stats(path) for path in paths]
 
 
 @dataclass

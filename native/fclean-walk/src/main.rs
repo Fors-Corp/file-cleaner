@@ -851,6 +851,34 @@ fn files_main(input: &str) {
 
 // --------------------------------------------------------------------- main
 
+#[derive(Deserialize)]
+struct SizesRequest {
+    dirs: Vec<String>,
+    #[serde(default)]
+    threads: usize,
+}
+
+/// `sizes` mode: `scanner.dir_stats` for many directories at once. One line
+/// per directory, by index, in whatever order they finish. A directory that
+/// cannot be read contributes nothing, as in Python.
+fn sizes_main(input: &str) {
+    use rayon::prelude::*;
+    let request: SizesRequest =
+        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad sizes request: {err}")));
+    start_pool(request.threads);
+    let out = Mutex::new(BufWriter::new(io::stdout()));
+    request.dirs.par_iter().enumerate().for_each(|(index, dir)| {
+        let own = fs::symlink_metadata(dir).map(|meta| mtime_nanos(&meta)).unwrap_or(0);
+        let (size, newest) = dir_stats(dir, own);
+        let line = json!({"i": index, "s": size, "t": newest as f64 / 1e9});
+        let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = writeln!(out, "{line}");
+    });
+    let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = writeln!(out, "{}", json!({"done": request.dirs.len()}));
+    let _ = out.flush();
+}
+
 fn fail(message: String) -> ! {
     eprintln!("fclean-walk: {message}");
     std::process::exit(2);
@@ -879,6 +907,7 @@ fn main() {
         Some("deny-lists") => return deny_lists_main(),
         Some("protected") => return protected_main(&input),
         Some("scan") => return scan_main(&input),
+        Some("sizes") => return sizes_main(&input),
         _ => {}
     }
 

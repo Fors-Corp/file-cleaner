@@ -23,6 +23,7 @@ candidates; turning matches into candidates is the scanner's job.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import warnings
@@ -230,3 +231,29 @@ def files(
         _gave_up("it reported a root that was never requested")
         return None
     return found
+
+
+def dir_sizes(dirs: Sequence[str]) -> list[tuple[int, float]] | None:
+    """``scanner.dir_stats`` for many directories at once: total size and
+    newest mtime below each, in the order asked. None means "not available —
+    size them in Python", as for ``scan``; an answer that does not cover
+    every directory exactly once, with sane numbers, counts as a failure."""
+    if not dirs:
+        return None
+    sized: dict[int, tuple[int, float]] = {}
+    repeated = False
+
+    def on_message(message: dict[str, Any]) -> None:
+        nonlocal repeated
+        if "i" in message:
+            index = int(message["i"])
+            repeated = repeated or index in sized
+            sized[index] = (int(message["s"]), float(message["t"]))
+
+    if not _converse(["sizes"], {"dirs": list(dirs)}, on_message):
+        return None
+    sane = all(size >= 0 and math.isfinite(mtime) and mtime >= 0 for size, mtime in sized.values())
+    if repeated or set(sized) != set(range(len(dirs))) or not sane:
+        _gave_up("it did not size exactly the directories it was asked to")
+        return None
+    return [sized[index] for index in range(len(dirs))]
