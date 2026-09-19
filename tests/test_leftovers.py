@@ -1,3 +1,4 @@
+import os
 import plistlib
 
 from filecleaner import leftovers
@@ -132,3 +133,41 @@ class TestInstallerCleanup:
         candidates = leftovers.find_installer_cleanup(sandbox_config, downloads=downloads)
 
         assert candidates == []
+
+
+class TestDamagedAndInterrupted:
+    def test_an_app_whose_info_plist_is_damaged_is_known_by_name(self, tmp_path, monkeypatch):
+        """A truncated XML plist used to escape as an ``ExpatError`` and take
+        ``fclean leftovers`` down with it."""
+        apps_dir = tmp_path / "Applications"
+        _make_app(apps_dir, "Whole", "com.example.whole")
+        damaged = _make_app(apps_dir, "Damaged", "com.example.damaged")
+        (damaged / "Contents" / "Info.plist").write_bytes(b"<plist>truncated")
+        monkeypatch.setattr(leftovers, "_APPLICATIONS_DIRS", (apps_dir,))
+
+        bundle_ids, names = leftovers.installed_apps()
+
+        assert bundle_ids == {"com.example.whole"} and names == {"Whole", "Damaged"}
+
+    def test_an_interrupted_listing_of_a_library_folder_is_retried(self, tmp_path, sandbox_config, monkeypatch, age_path):
+        """``~/Library/Containers`` is where macOS interrupts listings (see
+        ``listing``); unretried, every leftover in the folder went unseen."""
+        monkeypatch.setattr(leftovers, "_APPLICATIONS_DIRS", (tmp_path / "no-apps",))
+        orphan = tmp_path / "home" / "Library" / "Containers" / "com.gone.app"
+        orphan.mkdir(parents=True)
+        (orphan / "data").write_bytes(b"x" * 50)
+        age_path(orphan / "data", 90)
+        age_path(orphan, 90)
+        real, failures = os.scandir, []
+
+        def scandir(path):
+            if str(path).endswith("/Containers") and len(failures) < 3:
+                failures.append(path)
+                raise InterruptedError(4, "Interrupted system call")
+            return real(path)
+
+        monkeypatch.setattr(os, "scandir", scandir)
+
+        found = leftovers.find_app_leftovers(sandbox_config, home=tmp_path / "home")
+
+        assert [c.path.name for c in found] == ["com.gone.app"] and len(failures) == 3

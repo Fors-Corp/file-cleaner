@@ -35,9 +35,17 @@ use serde::Deserialize;
 use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
 
+mod audit;
+mod backups;
 mod config;
+mod duplicates;
+mod filewalk;
+mod largefiles;
+mod leftovers;
+mod plan;
 mod pyjson;
 mod pypath;
+mod pytime;
 mod report;
 mod rules;
 mod safety;
@@ -458,7 +466,7 @@ fn patiently<T>(path: &str, mut attempt: impl FnMut() -> io::Result<T>) -> io::R
 /// on after a failure is also what retries an interrupted read (the stream
 /// does not advance past what it failed to deliver) — but a stream that does
 /// nothing except fail is over.
-fn read_dir(dir: &str) -> io::Result<Vec<fs::DirEntry>> {
+pub fn read_dir(dir: &str) -> io::Result<Vec<fs::DirEntry>> {
     patiently(dir, || {
         let mut entries = Vec::new();
         let mut failures = 0;
@@ -562,13 +570,21 @@ fn join(dir: &str, name: &str) -> String {
     }
 }
 
-fn mtime_nanos(meta: &fs::Metadata) -> i64 {
+pub fn mtime_nanos(meta: &fs::Metadata) -> i64 {
     meta.mtime().saturating_mul(1_000_000_000).saturating_add(meta.mtime_nsec())
+}
+
+/// `os.stat_result.st_mtime`, to the bit: CPython adds the two halves as
+/// floats. Dividing the nanoseconds, as this helper does for what *it*
+/// reports, lands one step away for about a quarter of all times — so a
+/// value Python would have read for itself has to be made Python's way.
+pub fn st_mtime(nanos: i64) -> f64 {
+    nanos.div_euclid(1_000_000_000) as f64 + 1e-9 * nanos.rem_euclid(1_000_000_000) as f64
 }
 
 /// `scanner.dir_stats`: total size and newest mtime of everything below
 /// `path`, never following symlinks — but spread across the pool.
-fn dir_stats(path: &str, own_mtime: i64) -> (u64, i64) {
+pub fn dir_stats(path: &str, own_mtime: i64) -> (u64, i64) {
     fn visit<'s>(scope: &rayon::Scope<'s>, dir: String, size: &'s AtomicU64, newest: &'s AtomicI64) {
         #[cfg(target_os = "macos")]
         {
@@ -741,11 +757,18 @@ struct FilesRequest {
     min_size: u64,
 }
 
-struct Found {
-    path: String,
-    root: usize,
-    size: u64,
-    mtime_nanos: i64,
+pub struct Found {
+    pub path: String,
+    pub root: usize,
+    pub size: u64,
+    pub mtime_nanos: i64,
+}
+
+impl Found {
+    /// The one place nanoseconds become the float Python is given.
+    pub fn mtime(&self) -> f64 {
+        self.mtime_nanos as f64 / 1e9
+    }
 }
 
 struct FilesCtx {
@@ -757,15 +780,33 @@ struct FilesCtx {
     // Which name of a hard-linked file a parallel walk meets first is a
     // matter of timing, so they are held back and the smallest path wins.
     hard_links: Mutex<HashMap<(i64, u64), Found>>,
+    /// `native_files` collects what it finds instead of streaming it.
+    gather: Option<Mutex<Vec<Found>>>,
 }
 
 impl FilesCtx {
-    fn report(&self, found: &Found) {
+    fn new(deny: Deny, min_size: u64, gather: bool) -> FilesCtx {
+        FilesCtx {
+            deny,
+            min_size,
+            out: Mutex::new(BufWriter::with_capacity(1 << 20, io::stdout())),
+            reported: AtomicU64::new(0),
+            seen_dirs: Mutex::new(HashSet::new()),
+            hard_links: Mutex::new(HashMap::new()),
+            gather: gather.then(|| Mutex::new(Vec::new())),
+        }
+    }
+
+    fn report(&self, found: Found) {
         if found.size < self.min_size {
             return;
         }
         self.reported.fetch_add(1, Ordering::Relaxed);
-        let value = json!({"f": found.path, "r": found.root, "s": found.size, "t": found.mtime_nanos as f64 / 1e9});
+        if let Some(gather) = &self.gather {
+            gather.lock().unwrap_or_else(|e| e.into_inner()).push(found);
+            return;
+        }
+        let value = json!({"f": found.path, "r": found.root, "s": found.size, "t": found.mtime()});
         let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
         if serde_json::to_writer(&mut *out, &value).is_err() || out.write_all(b"\n").is_err() {
             std::process::exit(1);
@@ -774,7 +815,7 @@ impl FilesCtx {
 
     fn regular_file(&self, found: Found, dev: i64, ino: u64, nlink: u32) {
         if nlink <= 1 {
-            self.report(&found);
+            self.report(found);
             return;
         }
         let mut links = self.hard_links.lock().unwrap_or_else(|e| e.into_inner());
@@ -836,37 +877,37 @@ fn files_visit<'s>(scope: &rayon::Scope<'s>, ctx: &'s FilesCtx, root: usize, dir
     }
 }
 
-fn files_main(input: &str) {
-    let request: FilesRequest =
-        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad files request: {err}")));
-    let mut pool = rayon::ThreadPoolBuilder::new();
-    if request.threads > 0 {
-        pool = pool.num_threads(request.threads);
-    }
-    if let Err(err) = pool.build_global() {
-        fail(format!("cannot start thread pool: {err}"));
-    }
-    let ctx = FilesCtx {
-        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes },
-        min_size: request.min_size,
-        out: Mutex::new(BufWriter::with_capacity(1 << 20, io::stdout())),
-        reported: AtomicU64::new(0),
-        seen_dirs: Mutex::new(HashSet::new()),
-        hard_links: Mutex::new(HashMap::new()),
-    };
+fn run_files(ctx: &FilesCtx, roots: &[String]) {
     // One root at a time, each walked in parallel: when two roots reach the
     // same directory, the earlier root keeps it, as in the Python walk.
-    for (index, root) in request.roots.iter().enumerate() {
+    for (index, root) in roots.iter().enumerate() {
         let Ok(canonical) = fs::canonicalize(root) else { continue };
         let Some(resolved) = canonical.to_str().map(|s| s.trim_end_matches('/').to_owned()) else { continue };
-        let ctx = &ctx;
         rayon::scope(|scope| files_visit(scope, ctx, index, root.clone(), resolved));
     }
     let mut held: Vec<Found> = ctx.hard_links.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, f)| f).collect();
     held.sort_by(|a, b| a.path.cmp(&b.path));
-    for found in &held {
+    for found in held {
         ctx.report(found);
     }
+}
+
+/// The `files` walk for a caller in this process: everything it would have
+/// streamed, by path. The thread pool is the caller's to start.
+pub fn native_files(deny: Deny, roots: &[String], min_size: u64) -> Vec<Found> {
+    let ctx = FilesCtx::new(deny, min_size, true);
+    run_files(&ctx, roots);
+    let mut found = ctx.gather.map(|g| g.into_inner().unwrap_or_else(|e| e.into_inner())).unwrap_or_default();
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    found
+}
+
+fn files_main(input: &str) {
+    let request: FilesRequest =
+        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad files request: {err}")));
+    start_pool(request.threads);
+    let ctx = FilesCtx::new(Deny { home: request.deny_home, prefixes: request.deny_prefixes }, request.min_size, false);
+    run_files(&ctx, &request.roots);
     let value = json!({"done": ctx.reported.load(Ordering::Relaxed)});
     let mut out = ctx.out.lock().unwrap_or_else(|e| e.into_inner());
     if serde_json::to_writer(&mut *out, &value).is_err() || out.write_all(b"\n").is_err() || out.flush().is_err() {
@@ -935,6 +976,13 @@ fn main() {
         Some("sizes") => return sizes_main(&input),
         Some("scan-json") => return report::scan_json_main(&input),
         Some("config-json") => return report::config_json_main(&input),
+        Some("large-files-json") => return largefiles::main(&input),
+        Some("duplicates-json") => return duplicates::main(&input),
+        Some("leftovers-json") => return leftovers::main(&input),
+        Some("backups-list-json") => return backups::main(&input),
+        Some("audit-json") => return audit::main(&input),
+        Some("plan-save") => return plan::save_main(&input),
+        Some("plan-check-json") => return plan::check_main(&input),
         Some("pyjson") => return report::pyjson_main(&input),
         _ => {}
     }

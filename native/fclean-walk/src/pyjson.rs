@@ -7,6 +7,7 @@
 //! `1e-5`).
 
 pub enum J {
+    Null,
     Bool(bool),
     Int(i64),
     UInt(u64),
@@ -27,6 +28,28 @@ impl J {
 
     pub fn dict<const N: usize>(pairs: [(&str, J); N]) -> J {
         J::Dict(pairs.into_iter().map(|(key, value)| (key.to_owned(), value)).collect())
+    }
+
+    /// What `json.loads` made of it, as far as the two parsers agree: keys in
+    /// the order written (serde_json's `preserve_order`), a repeated key
+    /// keeping its first place and its last value, and floats read exactly
+    /// (`float_roundtrip`). Python also reads `NaN`, `Infinity` and integers
+    /// of any size; serde_json refuses the first two and reads the last as a
+    /// float — nothing File Cleaner writes contains any of them.
+    pub fn from_json(value: &serde_json::Value) -> J {
+        use serde_json::Value;
+        match value {
+            Value::Null => J::Null,
+            Value::Bool(flag) => J::Bool(*flag),
+            Value::Number(number) => match (number.as_u64(), number.as_i64()) {
+                (Some(unsigned), _) => J::UInt(unsigned),
+                (None, Some(signed)) => J::Int(signed),
+                (None, None) => J::Float(number.as_f64().unwrap_or(f64::NAN)),
+            },
+            Value::String(text) => J::Str(text.clone()),
+            Value::Array(items) => J::List(items.iter().map(J::from_json).collect()),
+            Value::Object(pairs) => J::Dict(pairs.iter().map(|(key, item)| (key.clone(), J::from_json(item))).collect()),
+        }
     }
 }
 
@@ -104,7 +127,7 @@ pub fn float_repr(x: f64) -> String {
     }
 }
 
-fn write_str(out: &mut String, text: &str) {
+fn write_str(out: &mut String, text: &str, ascii: bool) {
     out.push('"');
     for c in text.chars() {
         match c {
@@ -116,27 +139,35 @@ fn write_str(out: &mut String, text: &str) {
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            // ensure_ascii=True: whatever is not printable ASCII (DEL is not),
+            // in UTF-16 — so a character beyond U+FFFF is a surrogate pair.
+            c if ascii && (c as u32) > 0x7e => {
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
             c => out.push(c), // ensure_ascii=False: everything else as it is
         }
     }
     out.push('"');
 }
 
-fn write(out: &mut String, value: &J, depth: usize) {
+fn write(out: &mut String, value: &J, depth: usize, ascii: bool) {
     let pad = |out: &mut String, depth: usize| out.push_str(&"  ".repeat(depth));
     match value {
+        J::Null => out.push_str("null"),
         J::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
         J::Int(number) => out.push_str(&number.to_string()),
         J::UInt(number) => out.push_str(&number.to_string()),
         J::Float(number) => out.push_str(&float_repr(*number)),
-        J::Str(text) => write_str(out, text),
+        J::Str(text) => write_str(out, text, ascii),
         J::List(items) if items.is_empty() => out.push_str("[]"),
         J::Dict(pairs) if pairs.is_empty() => out.push_str("{}"),
         J::List(items) => {
             out.push_str("[\n");
             for (index, item) in items.iter().enumerate() {
                 pad(out, depth + 1);
-                write(out, item, depth + 1);
+                write(out, item, depth + 1, ascii);
                 out.push_str(if index + 1 < items.len() { ",\n" } else { "\n" });
             }
             pad(out, depth);
@@ -146,9 +177,9 @@ fn write(out: &mut String, value: &J, depth: usize) {
             out.push_str("{\n");
             for (index, (key, item)) in pairs.iter().enumerate() {
                 pad(out, depth + 1);
-                write_str(out, key);
+                write_str(out, key, ascii);
                 out.push_str(": ");
-                write(out, item, depth + 1);
+                write(out, item, depth + 1, ascii);
                 out.push_str(if index + 1 < pairs.len() { ",\n" } else { "\n" });
             }
             pad(out, depth);
@@ -159,7 +190,15 @@ fn write(out: &mut String, value: &J, depth: usize) {
 
 pub fn dumps(value: &J) -> String {
     let mut out = String::new();
-    write(&mut out, value, 0);
+    write(&mut out, value, 0, false);
+    out
+}
+
+/// `json.dumps(value, indent=2)`, with `ensure_ascii` left at its default:
+/// what Python writes to a file, where `dumps` is what it prints.
+pub fn dumps_ascii(value: &J) -> String {
+    let mut out = String::new();
+    write(&mut out, value, 0, true);
     out
 }
 
@@ -206,5 +245,19 @@ mod tests {
         ]);
         let expected = "{\n  \"empty\": [],\n  \"none\": {},\n  \"text\": \"a\\\"b\\\\c\\n\\t\\u0001é\u{2028}\u{7f}\",\n  \"nested\": [\n    -1,\n    true,\n    {\n      \"k\": 2.0\n    }\n  ]\n}";
         assert_eq!(dumps(&value), expected);
+    }
+
+    #[test]
+    fn ensure_ascii_escapes_what_json_dumps_escapes() {
+        // json.dumps({"k": None, "t": "é \x7f~ 𝄞"}, indent=2)
+        let value = J::dict([("k", J::Null), ("t", J::str("é\u{2028}\u{7f}~ 𝄞"))]);
+        assert_eq!(dumps_ascii(&value), "{\n  \"k\": null,\n  \"t\": \"\\u00e9\\u2028\\u007f~ \\ud834\\udd1e\"\n}");
+    }
+
+    #[test]
+    fn parsed_json_keeps_its_order_and_its_numbers() {
+        let parsed: serde_json::Value = serde_json::from_str(r#"{"z": 1, "a": -2, "f": 0.1, "z": [null, 1e3]}"#).unwrap();
+        let expected = "{\n  \"z\": [\n    null,\n    1000.0\n  ],\n  \"a\": -2,\n  \"f\": 0.1\n}";
+        assert_eq!(dumps(&J::from_json(&parsed)), expected); // as json.dumps(json.loads(...), indent=2)
     }
 }

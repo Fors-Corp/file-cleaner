@@ -14,11 +14,10 @@ Full Disk Access raises BackupAccessDenied.
 
 from __future__ import annotations
 
-import plistlib
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
+from filecleaner import plists
 from filecleaner.models import BackupInfo, Candidate
 
 
@@ -48,15 +47,6 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-def _load_plist(path: Path) -> dict[str, Any]:
-    try:
-        with path.open("rb") as f:
-            data: Any = plistlib.load(f)
-            return data if isinstance(data, dict) else {}
-    except (OSError, plistlib.InvalidFileException):
-        return {}
-
-
 def find_backups(base: Path | None = None) -> list[BackupInfo]:
     base = base or default_backup_root()
     if not base.is_dir():
@@ -75,8 +65,8 @@ def find_backups(base: Path | None = None) -> list[BackupInfo]:
     for entry in entries:
         if not entry.is_dir():
             continue
-        info = _load_plist(entry / "Info.plist")
-        manifest = _load_plist(entry / "Manifest.plist")
+        info = plists.load_dict(entry / "Info.plist")
+        manifest = plists.load_dict(entry / "Manifest.plist")
 
         device_name = info.get("Device Name") or entry.name
         product_type = info.get("Product Type", "")

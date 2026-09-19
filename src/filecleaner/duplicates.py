@@ -9,6 +9,7 @@ ruled out without ever being fully read.
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -22,6 +23,20 @@ ProgressCallback = Callable[[str], None]
 _PARTIAL_HASH_BYTES = 65536
 _FULL_HASH_CHUNK = 1024 * 1024
 _PROGRESS_EVERY_FILES = 500
+SF_DATALESS = 0x40000000  # <sys/stat.h>; `stat.SF_DATALESS` only since Python 3.13
+
+
+def _is_on_disk(path: Path) -> bool:
+    """False for a file macOS has evicted to iCloud, keeping a placeholder: the
+    contents come back the moment anything reads them. Hashing a home
+    directory's worth of those blocks for hours and fills the disk this tool
+    exists to free; and a file with no contents here wastes no space here, so
+    it is no duplicate worth finding. Asked only of same-size candidates —
+    the files about to be read — so it costs a fraction of the hashing."""
+    try:
+        return not os.lstat(path).st_flags & SF_DATALESS
+    except (OSError, AttributeError):  # gone (hashing will say so), or not a BSD
+        return True
 
 
 def _partial_hash(path: Path) -> str | None:
@@ -80,7 +95,13 @@ def find_duplicates(
     # Same-size candidates only — hashing is CPU/IO work per file, and
     # hashlib's OpenSSL backend releases the GIL for it, so a thread pool
     # gives real parallelism here instead of hashing one file at a time.
-    partial_candidates = [(size, path) for size, paths in size_buckets.items() if len(paths) >= 2 for path in paths]
+    partial_candidates = [
+        (size, path)
+        for size, paths in size_buckets.items()
+        if len(paths) >= 2
+        for path in paths
+        if _is_on_disk(path)
+    ]
     partial_buckets: dict[tuple[int, str], list[Path]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         partial_hashes = pool.map(_partial_hash, (path for _size, path in partial_candidates))

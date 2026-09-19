@@ -90,3 +90,28 @@ def test_to_candidate_wraps_backup(tmp_path):
     assert candidate.category == "Device Backups"
     assert candidate.is_dir is True
     assert candidate.size_bytes == found[0].size_bytes
+
+
+@pytest.mark.parametrize(
+    "damaged",
+    [
+        b"<plist>truncated",
+        b'<?xml version="1.0"?><plist version="1.0"><dict><key>Last Backup Date</key><date>not a date</date></dict></plist>',
+        b"bplist00 and then nothing that makes sense",
+        b"",
+    ],
+    ids=["truncated-xml", "bad-value", "damaged-binary", "empty"],
+)
+def test_a_backup_whose_plists_are_damaged_is_still_listed(tmp_path, damaged):
+    """One unreadable ``Info.plist`` must not take the whole listing down: a
+    truncated XML plist used to escape as an ``ExpatError``."""
+    backup = tmp_path / "UDID-1"
+    backup.mkdir()
+    (backup / "Info.plist").write_bytes(damaged)
+    (backup / "Manifest.plist").write_bytes(damaged)
+    (backup / "data").write_bytes(b"x" * 10)
+
+    [found] = backups.find_backups(tmp_path)
+
+    assert (found.device_name, found.last_backup_date, found.encrypted) == ("UDID-1", None, False)
+    assert found.size_bytes == 10 + 2 * len(damaged)
