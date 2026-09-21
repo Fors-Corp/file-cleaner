@@ -14,6 +14,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as does anything the user protects by hand. The Rust helper carries the same
   exception, with a test in each language.
 
+## [1.7.2] - 2026-09-19
+
+### Fixed
+- `fclean duplicates` no longer reads files that macOS has evicted to iCloud.
+  Such a file is a placeholder (`SF_DATALESS`), and its contents are
+  downloaded the moment anything reads them — so with "Desktop & Documents"
+  in iCloud Drive, looking for duplicates under home blocked for hours
+  (651,902 evicted files on the machine this was found on) and filled the
+  very disk it was meant to free. A file whose contents are not on this disk
+  wastes no space on it, so it is no duplicate worth finding: same-size
+  candidates are now checked before anything is opened, and an evicted one is
+  left alone. The same three folders: from not finishing in half an hour to
+  17.5 s, with nothing downloaded. (`large-files` and `scan` never read
+  contents, and still count such a file at its full size.)
+- One damaged `Info.plist` no longer takes a whole command down. A truncated
+  XML plist escapes `plistlib` as an `ExpatError` (a bad number as a
+  `ValueError`, a bad date as an `AttributeError`), which nothing caught:
+  `fclean backups list` died on one damaged backup, and `fclean leftovers`
+  on one damaged app bundle. A plist that cannot be read now simply names
+  nothing, as a missing one always did.
+- `fclean leftovers` lists `~/Library/Containers` and its neighbours through
+  the retrying listing of 1.6.1. It was the one walk of another app's sandbox
+  still using a bare `iterdir()`, so an interrupted listing (`EINTR`, after a
+  hang) silently hid every leftover in that folder.
+
+### Internal
+- Third phase of the Rust port (`docs/PORT.md`): the read-only commands.
+  `fclean-walk large-files-json`, `duplicates-json`, `leftovers-json`,
+  `backups-list-json`, `audit-json`, `plan-save` and `plan-check-json` print
+  what `fclean large-files`, `duplicates`, `leftovers`, `backups list` and
+  `audit` print with `--json` — byte for byte on real data, SHA-256 digests
+  and modification times included — and a plan written by either
+  implementation is the same bytes and is accepted, and found stale for the
+  same reasons, by the other. Nothing that acts on a finding is ported, and
+  still nothing `fclean` runs uses any of it. The helper gains two
+  dependencies, `sha2` and `plist`. What the comparison caught — CPython and
+  the helper spell 27% of modification times differently, `Path`s do not sort
+  as strings — is written up in the plan.
+
+## [1.7.1] - 2026-09-19
+
+### Fixed
+- `fclean duplicates` and `fclean large-files` could leave out, at random and
+  without saying so, files inside other apps' sandboxes
+  (`~/Library/Containers`, `~/Library/Group Containers`) — whenever they walk
+  in Python, which is when the native helper is not installed or has failed.
+  1.6.1 made the scanner and the helper retry a directory listing that macOS
+  interrupts (`EINTR`, after a hang), but this walk was an `os.walk`, which
+  does the listing itself and swallows its error: there was nothing to
+  retry, and the directory was skipped with everything below it. That could
+  only ever under-report — a duplicate or a large file not mentioned — never
+  report a file that is not there. The walk now lists directories itself,
+  through the same retrying listing as the scanner (now `listing.list_dir`),
+  and is otherwise unchanged: the same files, in the same order, under the
+  same names.
+
 ## [1.7.0] - 2026-09-19
 
 ### Added

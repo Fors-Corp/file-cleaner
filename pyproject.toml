@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "filecleaner"
-version = "1.7.0"
+version = "1.7.2"
 description = "Local-only, privacy-preserving macOS disk cleanup tool with a quarantine-based safety net"
 readme = "README.md"
 requires-python = ">=3.11"

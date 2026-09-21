@@ -35,9 +35,52 @@ pub fn expanduser(text: &str, home: &str) -> Result<String, String> {
     Ok(path)
 }
 
+/// `(Path(name).stem, Path(name).suffix)`, which since Python 3.14 is
+/// `posixpath.splitext(name)`: the last dot starts the suffix unless only
+/// dots come before it — `.app` and `..app` have no suffix, `Foo.` has `.`.
+pub fn splitext(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(dot) if name[..dot].bytes().any(|byte| byte != b'.') => name.split_at(dot),
+        _ => (name, ""),
+    }
+}
+
+/// How two `Path`s compare, which is how `sorted(paths)` orders them: part by
+/// part, not as strings — `/r/a/b` sorts before `/r/a-c/b`, though `-` sorts
+/// before `/`. Both paths as `normalise` leaves them.
+pub fn path_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.split('/').cmp(b.split('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splitext_is_stem_and_suffix() {
+        for (name, stem, suffix) in [
+            ("Foo.app", "Foo", ".app"),
+            (".app", ".app", ""),
+            ("..app", "..app", ""),
+            ("Foo.", "Foo", "."),
+            ("a.tar.gz", "a.tar", ".gz"),
+            ("x. y.zip", "x. y", ".zip"),
+            ("plain", "plain", ""),
+            ("é.dmg", "é", ".dmg"),
+        ] {
+            assert_eq!(splitext(name), (stem, suffix), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn paths_compare_part_by_part() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        assert_eq!(path_cmp("/r/a/b", "/r/a-c/b"), Less);
+        assert_eq!("/r/a/b".cmp("/r/a-c/b"), Greater); // what a string comparison would say
+        assert_eq!(path_cmp("/r/a", "/r/a/b"), Less);
+        assert_eq!(path_cmp("/r/é", "/r/z"), Greater); // by code point, as Python compares str
+        assert_eq!(path_cmp("a/b", "a/b"), Equal);
+    }
 
     #[test]
     fn normalise_is_str_of_path() {

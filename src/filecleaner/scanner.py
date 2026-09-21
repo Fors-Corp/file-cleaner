@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from filecleaner import config as config_mod
-from filecleaner import native_walk, safety
+from filecleaner import listing, native_walk, safety
 from filecleaner import rules as rules_mod
 from filecleaner.models import Candidate, Rule, ScanResult
 from filecleaner.volumes import default_scan_roots
@@ -45,7 +45,6 @@ from filecleaner.volumes import default_scan_roots
 ProgressCallback = Callable[[str, float | None], None]
 
 _MAX_ERRORS = 200
-_LISTING_RETRIES = 8
 _PROGRESS_EVERY_DIRS = 250
 _NEVER_DESCEND = frozenset({".git"})
 _WILDCARDS = ("*", "?", "[")
@@ -158,7 +157,7 @@ def dir_stats(path: Path) -> tuple[int, float]:
     while stack:
         current = stack.pop()
         try:
-            entries = _list_dir(current)
+            entries = listing.list_dir(current)
         except OSError:
             continue
         for entry in entries:
@@ -263,22 +262,6 @@ def _report_walking(progress: ProgressCallback, rule: Rule, rel: str, counter: _
     progress(message, percent)
 
 
-def _list_dir(path: str) -> list[os.DirEntry[str]]:
-    """Every entry of ``path``. Inside another app's sandbox
-    (``~/Library/Containers``) macOS now and then hangs the opening of a
-    directory for several seconds and then fails it with EINTR; asked again
-    it answers at once. So an interrupted listing is retried — reporting it
-    would call a readable directory unreadable and leave it unscanned."""
-    for _ in range(_LISTING_RETRIES):
-        try:
-            with os.scandir(path) as it:
-                return list(it)
-        except InterruptedError:
-            continue
-    with os.scandir(path) as it:
-        return list(it)
-
-
 def _walk_rule_pattern(ctx: _WalkContext) -> None:
     """Depth-first walk from the pattern's static prefix, emitting candidates."""
     start_rel = ctx.matcher.static_prefix
@@ -308,7 +291,7 @@ def _walk_rule_pattern(ctx: _WalkContext) -> None:
         dir_path, resolved_dir, dir_rel, depth = stack.pop()
         ctx.tick(dir_rel)
         try:
-            entries = _list_dir(dir_path)
+            entries = listing.list_dir(dir_path)
         except OSError as exc:
             ctx.record_error(f"{ctx.rule.id}: cannot read {dir_path}: {exc.strerror or exc}")
             continue

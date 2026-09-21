@@ -17,14 +17,23 @@ use crate::{config, fail, native_scan, safety, volumes, WalkSpec};
 const NEVER_DESCEND: [&str; 1] = [".git"];
 const MAX_ERRORS: usize = 200;
 
+/// Where things are, in every command's request. Each defaults to what
+/// Python would find for itself.
 #[derive(Deserialize)]
-struct NativeRequest {
-    /// Where things are. Each defaults to what Python would find for itself.
+pub struct Setup {
     home: Option<String>,
     volumes_dir: Option<String>,
     self_dirs: Option<Vec<String>>,
     config_dir: Option<String>,
     data_dir: Option<String>,
+    #[serde(default)]
+    pub threads: usize,
+}
+
+#[derive(Deserialize)]
+pub struct NativeRequest {
+    #[serde(flatten)]
+    pub setup: Setup,
     /// `fclean scan [ROOT] --rules a,b --include-disabled --exclude PATH`.
     root: Option<String>,
     only_rules: Option<Vec<String>>,
@@ -34,18 +43,18 @@ struct NativeRequest {
     extra_excludes: Vec<String>,
     /// The clock, when a caller needs two scans to agree about ages.
     now: Option<f64>,
-    #[serde(default)]
-    threads: usize,
 }
 
-struct Loaded {
-    env: safety::Environment,
-    paths: config::Paths,
-    config: toml::Table,
-    rules: Vec<Rule>,
+pub struct Loaded {
+    pub env: safety::Environment,
+    pub paths: config::Paths,
+    pub config: toml::Table,
+    pub rules: Vec<Rule>,
 }
 
-fn load(request: &NativeRequest) -> Loaded {
+/// Where home, the config and the data are: all that a command which reads
+/// no config needs (`audit` and `backups list` load none in Python either).
+pub fn locate(request: &Setup) -> (safety::Environment, config::Paths) {
     let home = request
         .home
         .clone()
@@ -65,6 +74,11 @@ fn load(request: &NativeRequest) -> Loaded {
     let explicit = (request.config_dir.as_deref(), request.data_dir.as_deref());
     let paths = config::paths(&env.home, explicit, |name| std::env::var(name).ok())
         .unwrap_or_else(|err| fail(format!("Configuration error: {err}")));
+    (env, paths)
+}
+
+pub fn load(request: &Setup) -> Loaded {
+    let (env, paths) = locate(request);
     let (config, warnings) = config::load(&paths).unwrap_or_else(|err| fail(format!("Configuration error: {err}")));
     let rules = rules::all_rules(&config).unwrap_or_else(|err| fail(format!("Invalid custom rule in config: {err}")));
     for warning in warnings {
@@ -79,7 +93,7 @@ fn load(request: &NativeRequest) -> Loaded {
 }
 
 /// `os.strerror`.
-fn strerror(errno: i32) -> String {
+pub fn strerror(errno: i32) -> String {
     let mut buffer = [0 as libc::c_char; 256];
     if unsafe { libc::strerror_r(errno, buffer.as_mut_ptr(), buffer.len()) } != 0 {
         return format!("Unknown error: {errno}");
@@ -95,11 +109,31 @@ fn same_path(a: &str, b: &str, cwd: &str) -> bool {
     }
 }
 
-pub fn scan_json_main(input: &str) {
-    let started = Instant::now();
-    let request: NativeRequest =
-        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad scan-json request: {err}")));
-    let Loaded { env, paths, config, rules: _ } = load(&request);
+/// `Candidate.to_dict`, as a scan report and a plan file both hold it.
+pub fn candidate_json(hit: &crate::Hit, rule: &Rule) -> J {
+    J::dict([
+        ("path", J::str(&hit.path)),
+        ("size_bytes", J::UInt(hit.size)),
+        ("is_dir", J::Bool(hit.is_dir)),
+        ("mtime", J::Float(hit.mtime)),
+        ("rule_id", J::str(&rule.id)),
+        ("category", J::str(&rule.category)),
+        ("risk", J::str(&rule.risk)),
+    ])
+}
+
+/// What `scanner.run_scan` returns, with what a report needs to describe it.
+pub struct Scan {
+    pub roots: Vec<String>,
+    pub scanned: crate::Scanned,
+    /// The rule behind each walk, by `Hit::walk`.
+    pub owners: Vec<Rule>,
+}
+
+/// `fclean scan` and `fclean clean`, up to the point where one prints a
+/// report and the other saves a plan.
+pub fn scan(request: &NativeRequest) -> Scan {
+    let Loaded { env, paths, config, rules: _ } = load(&request.setup);
     let selected = rules::select(&config, request.only_rules.as_deref(), request.include_disabled)
         .unwrap_or_else(|err| fail(err));
 
@@ -124,7 +158,7 @@ pub fn scan_json_main(input: &str) {
 
     // scanner._iter_targets, one walk per include glob
     let mut specs: Vec<WalkSpec> = Vec::new();
-    let mut owners: Vec<&Rule> = Vec::new();
+    let mut owners: Vec<Rule> = Vec::new();
     for rule in &selected {
         let bases: Vec<&String> = match rule.scope.as_str() {
             "home" if root_in_roots => vec![&root],
@@ -142,7 +176,7 @@ pub fn scan_json_main(input: &str) {
                     min_age_days: rule.min_age_days as f64,
                     min_size_bytes: rule.min_size_bytes.max(0) as u64,
                 });
-                owners.push(rule);
+                owners.push(rule.clone());
             }
         }
     }
@@ -151,7 +185,15 @@ pub fn scan_json_main(input: &str) {
         SystemTime::now().duration_since(UNIX_EPOCH).map(|since| since.as_secs_f64()).unwrap_or(0.0)
     });
     let never_descend: Vec<String> = NEVER_DESCEND.iter().map(|name| (*name).to_owned()).collect();
-    let scanned = native_scan(&env, &extra_protected, &never_descend, request.threads, now, &specs);
+    let scanned = native_scan(&env, &extra_protected, &never_descend, request.setup.threads, now, &specs);
+    Scan { roots, scanned, owners }
+}
+
+pub fn scan_json_main(input: &str) {
+    let started = Instant::now();
+    let request: NativeRequest =
+        serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad scan-json request: {err}")));
+    let Scan { roots, scanned, owners } = scan(&request);
 
     // ScanResult.to_dict
     let mut categories: Vec<(&str, u64, u64)> = Vec::new(); // in order of first appearance
@@ -199,18 +241,7 @@ pub fn scan_json_main(input: &str) {
                 scanned
                     .candidates
                     .iter()
-                    .map(|hit| {
-                        let rule = owners[hit.walk];
-                        J::dict([
-                            ("path", J::str(&hit.path)),
-                            ("size_bytes", J::UInt(hit.size)),
-                            ("is_dir", J::Bool(hit.is_dir)),
-                            ("mtime", J::Float(hit.mtime)),
-                            ("rule_id", J::str(&rule.id)),
-                            ("category", J::str(&rule.category)),
-                            ("risk", J::str(&rule.risk)),
-                        ])
-                    })
+                    .map(|hit| candidate_json(hit, &owners[hit.walk]))
                     .collect(),
             ),
         ),
@@ -222,7 +253,7 @@ pub fn scan_json_main(input: &str) {
 pub fn config_json_main(input: &str) {
     let request: NativeRequest =
         serde_json::from_str(input).unwrap_or_else(|err| fail(format!("bad config-json request: {err}")));
-    let Loaded { paths, config, rules, .. } = load(&request);
+    let Loaded { paths, config, rules, .. } = load(&request.setup);
     let listed = rules
         .iter()
         .map(|rule| {

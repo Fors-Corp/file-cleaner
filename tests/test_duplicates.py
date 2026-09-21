@@ -1,5 +1,7 @@
 import json
 import os
+import types
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -217,3 +219,36 @@ class TestSelectDeletions:
         to_delete, refused = duplicates.select_deletions(groups, keep="oldest")
         assert len(to_delete) == 3  # one kept per group: (2-1) + (3-1)
         assert refused == []
+
+
+def test_a_file_evicted_to_icloud_is_never_read(tmp_path, sandbox_config, monkeypatch):
+    """macOS keeps only a placeholder for a file it has evicted to iCloud
+    (``SF_DATALESS``) and downloads the contents the moment anything reads it.
+    Hashing a home directory's worth blocked for hours and filled the disk this
+    tool exists to free — and a file with no contents here wastes no space here,
+    so it is not a duplicate worth finding."""
+    monkeypatch.setenv("FCLEAN_NATIVE_WALK", "0")
+    for name in ("here.bin", "also-here.bin", "evicted.bin", "evicted-too.bin"):
+        (tmp_path / name).write_bytes(b"same " * 2000)
+    real_lstat, opened = os.lstat, []
+
+    def lstat(path, *args, **kwargs):
+        st = real_lstat(path, *args, **kwargs)
+        if "evicted" in os.path.basename(os.fspath(path)):  # not the folder: pytest names that after the test
+            fields = {name: getattr(st, name) for name in dir(st) if name.startswith("st_")}
+            return types.SimpleNamespace(**{**fields, "st_flags": st.st_flags | duplicates.SF_DATALESS})
+        return st
+
+    real_open = Path.open
+
+    def spying_open(self, *args, **kwargs):
+        opened.append(self.name)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(duplicates.os, "lstat", lstat)
+    monkeypatch.setattr(Path, "open", spying_open)
+
+    groups = duplicates.find_duplicates([tmp_path], sandbox_config)
+
+    assert [sorted(p.name for p in g.paths) for g in groups] == [["also-here.bin", "here.bin"]]
+    assert not [name for name in opened if "evicted" in name]
