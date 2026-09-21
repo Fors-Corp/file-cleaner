@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::fs;
 
-use crate::{key, Deny};
+use crate::{key, Deny, IcloudDrive};
 
 pub const ABSOLUTE_DENY_PATHS: &[&str] = &[
     "/System",
@@ -43,11 +43,14 @@ pub const HOME_DENY_SUBPATHS: &[&str] = &[
     "Library/Mail",
     "Library/Messages",
     "Library/Photos",
-    "Library/Mobile Documents",
+    "Library/Mobile Documents", // except iCloud Drive, see ICLOUD_DRIVE_SUBPATH
     "Library/Accounts",
     "Library/Passes",
     "Library/Wallet",
 ];
+
+/// The one child of `Library/Mobile Documents` that is not protected.
+pub const ICLOUD_DRIVE_SUBPATH: &str = "Library/Mobile Documents/com~apple~CloudDocs";
 
 /// More symlink hops than any real path has; past it, the path is a loop.
 const MAX_SYMLINK_HOPS: usize = 40;
@@ -159,11 +162,16 @@ pub fn build_index(env: &Environment, extra_protected: &[String]) -> Deny {
     denied.extend(env.self_dirs.iter().cloned());
     denied.extend(extra_protected.iter().map(|extra| resolve_or_absolute(extra, &env.cwd)));
 
-    let mut prefixes: Vec<String> =
-        denied.iter().map(|path| format!("{}/", key(path).trim_end_matches('/'))).collect();
+    let as_prefix = |path: &String| format!("{}/", key(path).trim_end_matches('/'));
+    let mut prefixes: Vec<String> = denied.iter().map(as_prefix).collect();
     prefixes.sort();
     prefixes.dedup();
-    Deny { home: key(&home), prefixes }
+    let containers = as_prefix(&under(&home, "Library/Mobile Documents"));
+    let prefixes_without_mobile_documents: Vec<String> =
+        prefixes.iter().filter(|p| **p != containers).cloned().collect();
+    let icloud_drive =
+        IcloudDrive { root: as_prefix(&under(&home, ICLOUD_DRIVE_SUBPATH)), prefixes_without_mobile_documents };
+    Deny { home: key(&home), prefixes, icloud_drive: Some(icloud_drive) }
 }
 
 /// `safety.is_protected`: the authoritative check. Resolves first, so it is
@@ -222,6 +230,22 @@ mod tests {
 
         assert!(is_protected(dir.join("a/x").to_str().expect("utf-8"), &index, "/"));
         assert!(!is_protected(dir.join("plain/x").to_str().expect("utf-8"), &index, "/"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn icloud_drive_is_open_but_other_icloud_containers_stay_protected() {
+        let dir = scratch("icloud");
+        let mut environment = env(&dir);
+        environment.home = dir.to_str().expect("utf-8").to_owned();
+        let index = build_index(&environment, &[]);
+        let mobile = format!("{}/Library/Mobile Documents", dir.display());
+
+        assert!(!is_protected(&format!("{mobile}/com~apple~CloudDocs/a/x"), &index, "/"));
+        assert!(!is_protected(&format!("{mobile}/COM~APPLE~CLOUDDOCS/x"), &index, "/"));
+        assert!(is_protected(&mobile, &index, "/"));
+        assert!(is_protected(&format!("{mobile}/com~apple~Notes/x"), &index, "/"));
+        assert!(is_protected(&format!("{mobile}/com~apple~CloudDocsx/x"), &index, "/"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
