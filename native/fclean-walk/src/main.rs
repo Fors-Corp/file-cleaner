@@ -171,6 +171,16 @@ pub fn key(s: &str) -> String {
 pub struct Deny {
     home: String,
     prefixes: Vec<String>,
+    icloud_drive: Option<IcloudDrive>,
+}
+
+/// iCloud Drive, the one place under `Library/Mobile Documents` that is not
+/// protected: inside it every rule but the Mobile Documents one still holds.
+/// Absent from a `Deny` received from Python, which prunes conservatively.
+#[derive(Clone)]
+pub struct IcloudDrive {
+    root: String,
+    prefixes_without_mobile_documents: Vec<String>,
 }
 
 impl Deny {
@@ -180,7 +190,11 @@ impl Deny {
             return true;
         }
         probe.push('/');
-        self.prefixes.iter().any(|p| probe.starts_with(p.as_str()))
+        let prefixes = match &self.icloud_drive {
+            Some(drive) if probe.starts_with(drive.root.as_str()) => &drive.prefixes_without_mobile_documents,
+            _ => &self.prefixes,
+        };
+        prefixes.iter().any(|p| probe.starts_with(p.as_str()))
     }
 }
 
@@ -847,7 +861,7 @@ fn files_main(input: &str) {
         fail(format!("cannot start thread pool: {err}"));
     }
     let ctx = FilesCtx {
-        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes },
+        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes, icloud_drive: None },
         min_size: request.min_size,
         out: Mutex::new(BufWriter::with_capacity(1 << 20, io::stdout())),
         reported: AtomicU64::new(0),
@@ -944,7 +958,7 @@ fn main() {
     let walks = compile_walks(&request.walks);
     start_pool(request.threads);
     let ctx = Ctx {
-        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes },
+        deny: Deny { home: request.deny_home, prefixes: request.deny_prefixes, icloud_drive: None },
         never_descend: request.never_descend,
         out: Mutex::new(BufWriter::new(io::stdout())),
         dirs: AtomicU64::new(0),
@@ -1305,7 +1319,7 @@ mod tests {
 
     #[test]
     fn deny_prefix_respects_the_path_separator() {
-        let deny = Deny { home: "/users/me".into(), prefixes: vec!["/usr/".into(), "/users/me/.ssh/".into()] };
+        let deny = Deny { home: "/users/me".into(), prefixes: vec!["/usr/".into(), "/users/me/.ssh/".into()], icloud_drive: None };
         assert!(deny.covers("/usr"));
         assert!(deny.covers("/USR/bin/x"));
         assert!(!deny.covers("/usr2/x"));

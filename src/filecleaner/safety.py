@@ -63,11 +63,16 @@ HOME_DENY_SUBPATHS: tuple[str, ...] = (
     "Library/Mail",
     "Library/Messages",
     "Library/Photos",
-    "Library/Mobile Documents",
+    "Library/Mobile Documents",  # except iCloud Drive, see ICLOUD_DRIVE_SUBPATH
     "Library/Accounts",
     "Library/Passes",
     "Library/Wallet",
 )
+
+# iCloud Drive proper. ``Library/Mobile Documents`` holds every app's iCloud
+# container (Notes, Pages, ...), which stay off-limits; this one child is the
+# user's own visible folder tree and is the single exception.
+ICLOUD_DRIVE_SUBPATH = "Library/Mobile Documents/com~apple~CloudDocs"
 
 # Where mounted volumes appear. A constant (rather than a literal inside
 # ``_volume_roots``) only so tests can point it at a sandbox.
@@ -136,11 +141,18 @@ class _DenyIndex:
 
     home: str  # protected as itself only; its children are fair game
     prefixes: tuple[str, ...]  # each ends with "/": protected at or below
+    icloud_drive: str  # ends with "/": exempt from the Mobile Documents rule
+    prefixes_in_icloud_drive: tuple[str, ...]  # ``prefixes`` minus that rule
 
     def covers(self, key: str) -> bool:
         # The trailing separator is part of the test so that ``/usr2`` is
         # not under ``/usr``, while ``/usr`` itself still is.
-        return key == self.home or (key + "/").startswith(self.prefixes)
+        if key == self.home:
+            return True
+        probe = key + "/"
+        if probe.startswith(self.icloud_drive):
+            return probe.startswith(self.prefixes_in_icloud_drive)
+        return probe.startswith(self.prefixes)
 
 
 def _build_deny_index(extra_protected: tuple[Path, ...]) -> _DenyIndex:
@@ -157,8 +169,20 @@ def _build_deny_index(extra_protected: tuple[Path, ...]) -> _DenyIndex:
     denied += _self_protected_paths()
     denied += [_resolve(extra) for extra in extra_protected]
 
-    prefixes = {_key(str(path)).rstrip("/") + "/" for path in denied}
-    return _DenyIndex(home=_key(str(home)), prefixes=tuple(sorted(prefixes)))
+    def as_prefix(path: Path) -> str:
+        return _key(str(path)).rstrip("/") + "/"
+
+    prefixes = {as_prefix(path) for path in denied}
+    # Inside iCloud Drive only the Mobile Documents rule is lifted; every
+    # other rule (system paths, user-added protections) still applies there.
+    containers = as_prefix(home / "Library/Mobile Documents")
+    still_denied = {as_prefix(path) for path in denied if as_prefix(path) != containers}
+    return _DenyIndex(
+        home=_key(str(home)),
+        prefixes=tuple(sorted(prefixes)),
+        icloud_drive=as_prefix(home / ICLOUD_DRIVE_SUBPATH),
+        prefixes_in_icloud_drive=tuple(sorted(still_denied)),
+    )
 
 
 _index_cache: dict[tuple[Path, ...], tuple[float, _DenyIndex]] = {}

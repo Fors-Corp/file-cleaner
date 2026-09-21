@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs`) is no longer
+  on the hard deny-list, so `organize` and the other commands can work on it.
+  Every other app container under `Library/Mobile Documents` stays protected,
+  as does anything the user protects by hand. The Rust helper carries the same
+  exception, with a test in each language.
+
 ## [1.7.0] - 2026-09-19
 
 ### Added

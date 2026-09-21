@@ -232,3 +232,16 @@ def test_allowed_roots_stay_case_sensitive(tmp_path: Path) -> None:
     root = tmp_path / "Root"
     (root / "sub").mkdir(parents=True)
     assert not safety.is_within_allowed_roots(tmp_path / "ROOT" / "sub", (root,))
+
+
+def test_icloud_drive_is_open_but_other_icloud_containers_stay_protected(in_world: _World) -> None:
+    mobile = in_world.home / "Library" / "Mobile Documents"
+    drive = mobile / "com~apple~CloudDocs"
+    assert not safety.is_protected(drive)
+    assert not safety.is_protected(drive / "01 - EDUCATION" / "notes.pdf")
+    assert not safety.is_protected(mobile / "COM~APPLE~CLOUDDOCS" / "x")  # APFS is case-insensitive
+    assert safety.is_protected(mobile)
+    assert safety.is_protected(mobile / "com~apple~Notes" / "x")
+    assert safety.is_protected(mobile / "com~apple~CloudDocsx" / "x")  # boundary: a different container
+    # Protections a user adds still apply inside iCloud Drive.
+    assert safety.is_protected(drive / "Alquiler" / "x", extra_protected=(drive / "Alquiler",))
