@@ -43,6 +43,12 @@ def test_no_args_shows_help(sandbox_home):
     assert "Usage" in result.stdout
 
 
+def test_help_has_single_support_line(sandbox_home):
+    result = _invoke("--help")
+    assert result.exit_code == 0
+    assert result.stdout.count("Support this project: https://marcfors.com/donate?from=file-cleaner") == 1
+
+
 def test_scan_json_reports_candidate(cache_item, sandbox_home):
     result = _invoke("scan", "--json")
     assert result.exit_code == 0

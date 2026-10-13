@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Support · 1,99 € link (`https://marcfors.com/donate?from=file-cleaner`) in the README and as one
+  line at the end of `fclean --help`. No runtime network calls.
+
 ### Changed
 - iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs`) is no longer
   on the hard deny-list, so `organize` and the other commands can work on it.

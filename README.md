@@ -3,6 +3,7 @@
 [![CI](https://github.com/Fors-Corp/file-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/Fors-Corp/file-cleaner/actions/workflows/ci.yml)
 ![SemVer](https://img.shields.io/badge/versioning-SemVer-blue)
 ![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-lightgrey)
+[![Support · 1,99 €](https://img.shields.io/badge/Support-1%2C99_%E2%82%AC-2f855a)](https://marcfors.com/donate?from=file-cleaner)
 
 A local-only disk cleanup tool for macOS (CLI + interactive TUI) built around one rule:
 **nothing is ever permanently deleted without an explicit, confirmed step.** Everything
@@ -519,6 +520,10 @@ needs to change to build that; it is already the seam such an app would plug int
 
 This project follows [Semantic Versioning](https://semver.org/). See
 [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Support
+
+If this project is useful to you, you can [support it with 1,99 €](https://marcfors.com/donate?from=file-cleaner).
 
 ## License
 

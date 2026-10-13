@@ -40,10 +40,13 @@ from filecleaner import schedule as schedule_mod
 from filecleaner import volumes as volumes_mod
 from filecleaner.models import ActionResult, BackupInfo, Candidate, QuarantineEntry, ScanResult
 
+SUPPORT_LINE = "Support this project: https://marcfors.com/donate?from=file-cleaner"
+
 app = typer.Typer(
     add_completion=False,
     invoke_without_command=True,
     help="Local, privacy-preserving disk cleanup with a quarantine-based safety net.",
+    epilog=SUPPORT_LINE,
 )
 quarantine_app = typer.Typer(no_args_is_help=True, help="Inspect, restore, or purge the quarantine safety net.")
 config_app = typer.Typer(no_args_is_help=True, help="View or edit configuration and rules.")
